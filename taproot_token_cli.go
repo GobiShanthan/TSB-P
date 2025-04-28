@@ -80,7 +80,7 @@ func LoadFundingData(filename string) (*FundingData, error) {
 
 // ---------------------- Token Operations ----------------------
 
-func CreateToken(tokenID string, amount uint64, metadata string) (*OutputData, error) {
+func CreateToken(tokenID string, amount uint64, metadata string, typeCode uint8) (*OutputData, error) {
     var token *TaprootToken
     var err error
 
@@ -117,7 +117,8 @@ func CreateToken(tokenID string, amount uint64, metadata string) (*OutputData, e
         TokenID:   paddedTokenID,
         Amount:    amount,
         Metadata:  metadata,
-        Timestamp: uint64(time.Now().Unix()), // 🔥🔥🔥
+        Timestamp: uint64(time.Now().Unix()), 
+		TypeCode:  typeCode,
     }
 
     scriptTree, err := token.CreateTaprootOutput(tokenData)
@@ -234,6 +235,7 @@ func SpendToken(destination string) (string, error) {
 	tokenData := &TokenData{
 		TokenID:  outputData.TokenData.TokenID,
 		Amount:   outputData.TokenData.Amount,
+		TypeCode:  outputData.TokenData.TypeCode,
 		Metadata: outputData.TokenData.Metadata,
 		Timestamp: outputData.TokenData.Timestamp,
 	}
@@ -344,6 +346,7 @@ func main() {
 	var tokenName = "gobi-token"
 	var tokenAmount uint64 = 1337
 	var tokenMetadata = "TSB reveal test"
+	var tokenTypeCode uint8 = 0  // ✅ NEW: Default typecode 0 (fungible)
 
 	// Handle optional CLI arguments
 	if len(os.Args) > 1 {
@@ -363,12 +366,20 @@ func main() {
 			} else if arg == "--metadata" && i+1 < len(os.Args) {
 				tokenMetadata = os.Args[i+1]
 				i++
+			} else if arg == "--typecode" && i+1 < len(os.Args) {  // ✅ NEW
+				tc, err := strconv.ParseUint(os.Args[i+1], 10, 8)
+				if err != nil {
+					fmt.Fprintf(os.Stderr, "❌ Invalid typecode: %v\n", err)
+					os.Exit(1)
+				}
+				tokenTypeCode = uint8(tc)
+				i++
 			}
 		}
 	}
 
 	fmt.Println("\n🔄 Creating token...")
-	output, err := CreateToken(tokenName, tokenAmount, tokenMetadata)
+	output, err := CreateToken(tokenName, tokenAmount, tokenMetadata, tokenTypeCode)  // ✅ pass typeCode here
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "❌ Error creating token: %v\n", err)
 		os.Exit(1)
@@ -426,6 +437,7 @@ func main() {
 	fmt.Printf("  Amount  : %d\n", revealed.Amount)
 	fmt.Printf("  Metadata: %s\n", revealed.Metadata)
 	fmt.Printf("  Timestamp: %d\n", revealed.Timestamp)
+	fmt.Printf("  TypeCode: %d\n", revealed.TypeCode)
 
 	fmt.Println("\n🎉 All operations completed successfully with no fake fallbacks!")
 }

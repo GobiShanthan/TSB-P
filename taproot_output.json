@@ -1,12 +1,12 @@
 {
-  "address": "bcrt1pmra4fw2g72fyhraws8k4g3mvtrdv6twldyhdj5ufuank39wtwffsvxyjla",
-  "scriptHex": "516303545342107361746f736869763200000000000000080000000001312d0000757575751474657374696e6720746f7272616d20746f6b656e0800000000680eef0d75755168",
+  "address": "bcrt1pl7vztzf8nqwen2h4v678gxf2z54s3qxq6d7u5u5t9nwyfqkl957s6z0pwk",
+  "scriptHex": "51630354534210476f6b754e46540000000000000000000800000002540be40051757575750d4578636c7573697665204e46540800000000680efa9c75755168",
   "controlBlockHex": "c0e5d61966506ffd45fdab6c2e6af0a135cea80c7bfd22dad146e33df9aec6bd14",
   "tokenData": {
-    "TokenID": "satoshiv2\u0000\u0000\u0000\u0000\u0000\u0000\u0000",
-    "Amount": 20000000,
-    "TypeCode": 0,
-    "Metadata": "testing torram token",
-    "Timestamp": 1745809165
+    "TokenID": "GokuNFT\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000",
+    "Amount": 10000000000,
+    "TypeCode": 1,
+    "Metadata": "Exclusive NFT",
+    "Timestamp": 1745812124
   }
 }
