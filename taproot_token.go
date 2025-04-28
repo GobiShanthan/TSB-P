@@ -9,6 +9,7 @@ import (
 	"os"
 	"fmt"
     "strings"
+    "strconv"
 	"github.com/btcsuite/btcd/btcec/v2"
 	"github.com/btcsuite/btcd/btcutil"
 	"github.com/btcsuite/btcd/chaincfg"
@@ -28,11 +29,13 @@ const (
 var Network = &chaincfg.RegressionNetParams
 
 type TokenData struct {
-	TokenID  string
-	Amount   uint64
-	Metadata string
-    Timestamp uint64 
+	TokenID   string
+	Amount    uint64
+	TypeCode  byte
+	Metadata  string
+	Timestamp uint64
 }
+
 
 func (t *TokenData) ToBytes() []byte {
 	tokenIDBuf := []byte(t.TokenID)
@@ -136,46 +139,49 @@ func LoadTaprootToken(privKeyHex string) (*TaprootToken, error) {
 	}, nil
 }
 
-// CreateTaprootOutput builds the leaf script, computes the BIP-341 tweak
 func (t *TaprootToken) CreateTaprootOutput(token *TokenData) (*TaprootScriptTree, error) {
     builder := txscript.NewScriptBuilder()
 
-    // Push "TSB" marker
-    builder.AddData([]byte("TSB"))
+    builder.AddOp(txscript.OP_TRUE)  // 👈 ADD this first
+    builder.AddOp(txscript.OP_IF)    // 👈 THEN this
 
-    // Push token ID (must be 16 bytes padded)
-    builder.AddData([]byte(token.TokenID))
-
-    // Push amount (8 bytes, big endian)
+    // Push standard fields
+    builder.AddData([]byte("TSB"))                             // Marker
+    builder.AddData([]byte(token.TokenID))                     // TokenID
     amountBytes := make([]byte, 8)
     binary.BigEndian.PutUint64(amountBytes, token.Amount)
-    builder.AddData(amountBytes)
+    builder.AddData(amountBytes)                               // Amount
+    builder.AddData([]byte{token.TypeCode})                    // TypeCode
 
-    // Push metadata
-    builder.AddData([]byte(token.Metadata))
+    // Drop standard fields
+    builder.AddOp(txscript.OP_DROP)
+    builder.AddOp(txscript.OP_DROP)
+    builder.AddOp(txscript.OP_DROP)
+    builder.AddOp(txscript.OP_DROP)
 
-    // Push timestamp (8 bytes, big endian)
+    // Push optional fields
+    builder.AddData([]byte(token.Metadata))                    // Metadata
     timestampBytes := make([]byte, 8)
     binary.BigEndian.PutUint64(timestampBytes, token.Timestamp)
-    builder.AddData(timestampBytes)
+    builder.AddData(timestampBytes)                            // Timestamp
 
-    // Drop all fields
-    builder.AddOp(txscript.OP_DROP) // Timestamp
-    builder.AddOp(txscript.OP_DROP) // Metadata
-    builder.AddOp(txscript.OP_DROP) // Amount
-    builder.AddOp(txscript.OP_DROP) // TokenID
-    builder.AddOp(txscript.OP_DROP) // Marker
+    // Drop optional fields
+    builder.AddOp(txscript.OP_DROP)                            // Timestamp
+    builder.AddOp(txscript.OP_DROP)                            // Metadata
 
-    // Final programmable logic
+    // Final programmable logic (basic OP_TRUE for now)
     builder.AddOp(txscript.OP_TRUE)
 
-    // Finalize the script
+    // End with OP_ENDIF
+    builder.AddOp(txscript.OP_ENDIF)
+
+    // Compile the script
     script, err := builder.Script()
     if err != nil {
         return nil, err
     }
 
-    // Build TapLeaf
+    // Taproot leaf creation
     var sizeBuf [binary.MaxVarintLen64]byte
     sz := binary.PutUvarint(sizeBuf[:], uint64(len(script)))
     leafInput := make([]byte, 1+sz+len(script))
@@ -185,11 +191,8 @@ func (t *TaprootToken) CreateTaprootOutput(token *TokenData) (*TaprootScriptTree
 
     leafHash := TaggedHash(TapscriptLeafTaggedHash, leafInput)
     merkleRoot := leafHash
-
-    // Correct Taproot tweak (BIP-341)
     tweakedPubKey := txscript.ComputeTaprootOutputKey(t.PublicKey, merkleRoot)
 
-    // Build control block
     internalX := t.PublicKey.SerializeCompressed()[1:33]
     comp := tweakedPubKey.SerializeCompressed()
     var parity byte
@@ -428,48 +431,85 @@ func (t *TaprootToken) RevealTokenDataFromHex(rawTxHex string) (*TokenData, erro
     fmt.Println(scriptAsm)
 
     parts := strings.Split(scriptAsm, " ")
-    if len(parts) < 11 {
+    if len(parts) < 16 {
         return nil, fmt.Errorf("script too short: %d parts", len(parts))
     }
 
-    markerBytes, err := hex.DecodeString(parts[0])
+    // 1. Expect OP_TRUE
+    if parts[0] != "1" {
+        return nil, fmt.Errorf("expected OP_TRUE, got: %s", parts[0])
+    }
+
+    // 2. Expect OP_IF
+    if parts[1] != "OP_IF" {
+        return nil, fmt.Errorf("expected OP_IF, got: %s", parts[1])
+    }
+
+    // 3. Verify marker
+    markerBytes, err := hex.DecodeString(parts[2])
     if err != nil || string(markerBytes) != "TSB" {
         return nil, fmt.Errorf("invalid marker: %x", markerBytes)
     }
 
-    tokenIDBytes, err := hex.DecodeString(parts[1])
+    // 4. Extract token ID
+    tokenIDBytes, err := hex.DecodeString(parts[3])
     if err != nil {
         return nil, fmt.Errorf("invalid tokenID: %w", err)
     }
     tokenID := strings.TrimRight(string(tokenIDBytes), "\x00")
 
-    amountBytes, err := hex.DecodeString(parts[2])
+    // 5. Extract amount
+    amountBytes, err := hex.DecodeString(parts[4])
     if err != nil {
         return nil, fmt.Errorf("invalid amount: %w", err)
     }
     amount := binary.BigEndian.Uint64(amountBytes)
 
-    metadataBytes, err := hex.DecodeString(parts[3])
+    // 6. Extract type_code
+    typeCodeInt, err := strconv.ParseUint(parts[5], 10, 8)
     if err != nil {
-        return nil, fmt.Errorf("invalid metadata: %w", err)
+        return nil, fmt.Errorf("invalid type_code: %w", err)
     }
-    metadata := string(metadataBytes)
+    typeCode := byte(typeCodeInt)
 
-    timestampBytes, err := hex.DecodeString(parts[4])
+    // 7. Verify 4x OP_DROP
+    if parts[6] != "OP_DROP" || parts[7] != "OP_DROP" || parts[8] != "OP_DROP" || parts[9] != "OP_DROP" {
+        return nil, fmt.Errorf("expected 4x OP_DROP after header fields")
+    }
+
+    // 8. Extract metadata
+    fmt.Println("🔍 DEBUG: Raw metadata part:", parts[10])
+
+    metadataDecoded, err := hex.DecodeString(parts[10])
+    if err != nil {
+        return nil, fmt.Errorf("invalid metadata hex: %w", err)
+    }
+    metadata := string(metadataDecoded)
+
+    // 9. Extract timestamp
+    timestampBytes, err := hex.DecodeString(parts[11])
     if err != nil {
         return nil, fmt.Errorf("invalid timestamp: %w", err)
     }
+    if len(timestampBytes) != 8 {
+        return nil, fmt.Errorf("timestamp wrong length")
+    }
     timestamp := binary.BigEndian.Uint64(timestampBytes)
 
-    // 🛠 Fixed check for DROP DROP DROP DROP DROP TRUE/1
-    if parts[5] != "OP_DROP" || parts[6] != "OP_DROP" || parts[7] != "OP_DROP" || parts[8] != "OP_DROP" || parts[9] != "OP_DROP" || (parts[10] != "1" && parts[10] != "OP_TRUE") {
-        return nil, fmt.Errorf("unexpected script ending: %v", parts[5:])
+    // 10. Verify 2x OP_DROP
+    if parts[12] != "OP_DROP" || parts[13] != "OP_DROP" {
+        return nil, fmt.Errorf("expected 2x OP_DROP after metadata/timestamp")
     }
-    
+
+    // 11. Programmable logic (1 or OP_TRUE)
+    if parts[14] != "1" && parts[14] != "OP_TRUE" {
+        return nil, fmt.Errorf("unexpected programmable logic: %s", parts[14])
+    }
 
     return &TokenData{
         TokenID:   tokenID,
         Amount:    amount,
+        TypeCode:  typeCode,
         Metadata:  metadata,
         Timestamp: timestamp,
     }, nil
