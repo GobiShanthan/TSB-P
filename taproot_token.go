@@ -273,9 +273,12 @@ func (t *TaprootToken) CreateScriptPathSpendingTx(
     // 3) Fee & outputs
     const estSize = 200
     fee := (feeRate * estSize) / 1000
-    if fee < 1000 {
-        fee = 1000
+    
+    // Lower minimum fee for small test transactions
+    if fee < 300 {
+        fee = 300
     }
+    
     sendAmt := amount - fee
     if sendAmt <= 0 {
         return nil, errors.New("insufficient funds for fee")

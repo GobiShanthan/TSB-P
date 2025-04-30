@@ -344,7 +344,7 @@ fmt.Println("🔍 DEBUG: --- FULL DEBUG LOG END ---")
 
 func main() {
 	var tokenName = "gobi-token"
-	var tokenAmount uint64 = 1337
+	var tokenAmount uint64 = 1
 	var tokenMetadata = "TSB reveal test"
 	var tokenTypeCode uint8 = 0  // ✅ NEW: Default typecode 0 (fungible)
 
@@ -387,7 +387,7 @@ func main() {
 	fmt.Println("✅ Token created successfully")
 
 	fmt.Println("\n🔄 Funding the address...")
-	funding, err := FundAddress(output.Address, 1.0)
+	funding, err := FundAddress(output.Address, 0.00000850)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "❌ Error funding address: %v\n", err)
 		os.Exit(1)
