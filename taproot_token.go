@@ -26,7 +26,7 @@ const (
 	TapscriptLeafVersion     = 0xc0
 )
 
-var Network = &chaincfg.RegressionNetParams
+var Network = &chaincfg.TestNet3Params
 
 type TokenData struct {
 	TokenID   string

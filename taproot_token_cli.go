@@ -15,7 +15,8 @@ import (
 
 // ---------------------- Bitcoin CLI Runner ----------------------
 
-const BitcoinCLI = "bitcoin-cli -regtest -rpcwallet=token_wallet"
+const BitcoinCLI = "bitcoin-cli -testnet -rpcwallet=token_wallet"
+
 
 func RunBitcoinCommand(args string) (string, error) {
 	cmd := exec.Command("sh", "-c", fmt.Sprintf("%s %s", BitcoinCLI, args))

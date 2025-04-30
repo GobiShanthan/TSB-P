@@ -1,12 +1,12 @@
 {
-  "address": "bcrt1p72p363nm85mvc063q8fal24dqdruwrgu4t76tr25ykgmt635vkssnnczpu",
-  "scriptHex": "516303545342106d6963726f000000000000000000000008000000000000000100757575750835343620746573740800000000681226eb75755168",
-  "controlBlockHex": "c1e5d61966506ffd45fdab6c2e6af0a135cea80c7bfd22dad146e33df9aec6bd14",
+  "address": "tb1psm9ta45fjas7u7srrh47536xfm8kgqyvyk5x65jkccgmcv70ur3skw9heq",
+  "scriptHex": "5163035453421056657374696e670000000000000000000800000002540be4005375757575164578636c75736976652076657374696e672074657374080000000068122b1c75755168",
+  "controlBlockHex": "c0e5d61966506ffd45fdab6c2e6af0a135cea80c7bfd22dad146e33df9aec6bd14",
   "tokenData": {
-    "TokenID": "micro\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000",
-    "Amount": 1,
-    "TypeCode": 0,
-    "Metadata": "546 test",
-    "Timestamp": 1746020075
+    "TokenID": "Vesting\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000",
+    "Amount": 10000000000,
+    "TypeCode": 3,
+    "Metadata": "Exclusive vesting test",
+    "Timestamp": 1746021148
   }
 }
