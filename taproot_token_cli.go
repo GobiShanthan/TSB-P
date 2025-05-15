@@ -12,6 +12,7 @@ import (
 	"time"
 	"strconv"
 	"github.com/btcsuite/btcd/btcec/v2"
+    "github.com/btcsuite/btcd/chaincfg"
 
 )
 
@@ -408,6 +409,12 @@ func TransferToken(tokenKeyHex string, tokenUTXO *FundingData, tokenData *TokenD
 
 // [Modified transfer logic with ownership verification and auto-change handling]
 
+func encodeTaprootAddress(pubkeyBytes []byte, params *chaincfg.Params) (string, error) {
+    hrp := params.Bech32HRPSegwit
+    data := append([]byte{0x01}, pubkeyBytes...)
+    return bech32m.Encode(hrp, data)
+}
+
 func handleTransferCommand() {
     var recipientAddress string
     var transferAmount uint64
@@ -488,7 +495,6 @@ func handleTransferCommand() {
         os.Exit(1)
     }
 
-    // Verify ownership and balance
     if transferAmount > outputData.TokenData.Amount {
         fmt.Fprintf(os.Stderr, "❌ You do not own enough of the token. Balance: %d, Requested: %d\n", outputData.TokenData.Amount, transferAmount)
         os.Exit(1)
@@ -530,13 +536,17 @@ func handleTransferCommand() {
     _ = SaveOutputData(tokenFile, outputData)
     _ = SaveFundingData("recipient_funding.json", recipientFunding)
 
+    tweakedPub := recipientFunding.ScriptHex[4:68] // Extract x-only pubkey portion from script
+    tapAddr, _ := encodeTaprootAddress([]byte(tweakedPub), &chaincfg.TestNet3Params)
+
     fmt.Println("\n✅ Token transfer successful!")
     fmt.Println("  Token       :", outputData.TokenData.TokenID)
-    fmt.Println("  To          :", recipientAddress)
+    fmt.Println("  To          :", tapAddr)
     fmt.Println("  Amount      :", transferAmount)
     fmt.Println("  Transaction :", txid)
     fmt.Println("  Remaining   :", outputData.TokenData.Amount)
 }
+
 
 
 // ---------------------- CLI Entrypoint ----------------------
