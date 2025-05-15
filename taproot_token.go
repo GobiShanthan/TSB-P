@@ -553,126 +553,97 @@ func ExtractTokenDataFromWitness(witness wire.TxWitness) (*TokenData, error) {
 }
 
 
-
+// RevealTokenDataFromHex parses a script-path spend and returns only the embedded fields,
+// leaving TokenID exactly as the original name (no ":TXID" suffix).
 func (t *TaprootToken) RevealTokenDataFromHex(rawTxHex string) (*TokenData, error) {
+    // 1) Decode the hex into bytes
     txBytes, err := hex.DecodeString(strings.TrimSpace(rawTxHex))
     if err != nil {
         return nil, fmt.Errorf("failed to decode hex: %w", err)
     }
+
+    // 2) Deserialize the transaction
     var tx wire.MsgTx
-    err = tx.Deserialize(bytes.NewReader(txBytes))
-    if err != nil {
+    if err := tx.Deserialize(bytes.NewReader(txBytes)); err != nil {
         return nil, fmt.Errorf("failed to deserialize transaction: %w", err)
     }
 
+    // 3) Ensure there is at least one input with a witness
     if len(tx.TxIn) == 0 {
         return nil, fmt.Errorf("transaction has no inputs")
     }
-
-    input := tx.TxIn[0]
-
-    if len(input.Witness) < 2 {
+    witness := tx.TxIn[0].Witness
+    if len(witness) < 2 {
         return nil, fmt.Errorf("witness stack too short")
     }
 
-    fmt.Println("🔍 DEBUG: Full Witness Stack:")
-    for idx, item := range input.Witness {
-        fmt.Printf("  Item %d: %x (length: %d)\n", idx, item, len(item))
-    }
+    // 4) Extract the script (second-to-last element)
+    scriptBytes := witness[len(witness)-2]
 
-    var scriptBytes []byte
-
-    if len(input.Witness[len(input.Witness)-1]) == 33 {
-        scriptBytes = input.Witness[len(input.Witness)-2]
-    } else {
-        return nil, fmt.Errorf("unexpected control block length: %d", len(input.Witness[len(input.Witness)-1]))
-    }
-
-    fmt.Printf("🔍 DEBUG: Using scriptBytes for Disasm: %x\n", scriptBytes)
-
-    scriptAsm, err := txscript.DisasmString(scriptBytes)
+    // 5) Disassemble the script so we can parse pushes
+    asm, err := txscript.DisasmString(scriptBytes)
     if err != nil {
         return nil, fmt.Errorf("failed to disassemble script: %w", err)
     }
-    fmt.Println("🔍 DEBUG: Script Disassembly:")
-    fmt.Println(scriptAsm)
-
-    parts := strings.Split(scriptAsm, " ")
+    parts := strings.Split(asm, " ")
     if len(parts) < 16 {
         return nil, fmt.Errorf("script too short: %d parts", len(parts))
     }
 
-    // 1. Expect OP_TRUE
+    // 6) Parse fields in order:
+
+    // a) OP_TRUE, OP_IF
     if parts[0] != "1" {
-        return nil, fmt.Errorf("expected OP_TRUE, got: %s", parts[0])
+        return nil, fmt.Errorf("expected OP_TRUE, got %s", parts[0])
     }
-
-    // 2. Expect OP_IF
     if parts[1] != "OP_IF" {
-        return nil, fmt.Errorf("expected OP_IF, got: %s", parts[1])
+        return nil, fmt.Errorf("expected OP_IF, got %s", parts[1])
     }
 
-    // 3. Verify marker
-    markerBytes, err := hex.DecodeString(parts[2])
-    if err != nil || string(markerBytes) != "TSB" {
-        return nil, fmt.Errorf("invalid marker: %x", markerBytes)
+    // b) Marker "TSB"
+    marker, err := hex.DecodeString(parts[2])
+    if err != nil || string(marker) != "TSB" {
+        return nil, fmt.Errorf("invalid marker: %x", marker)
     }
 
-    // 4. Extract token ID
-    tokenIDBytes, err := hex.DecodeString(parts[3])
+    // c) TokenID (hex, then trim padding)
+    rawID, err := hex.DecodeString(parts[3])
     if err != nil {
         return nil, fmt.Errorf("invalid tokenID: %w", err)
     }
-    tokenID := strings.TrimRight(string(tokenIDBytes), "\x00")
+    tokenID := strings.TrimRight(string(rawID), "\x00")
 
-    // 5. Extract amount
-    amountBytes, err := hex.DecodeString(parts[4])
+    // d) Amount (8-byte big endian)
+    amtBytes, err := hex.DecodeString(parts[4])
     if err != nil {
         return nil, fmt.Errorf("invalid amount: %w", err)
     }
-    amount := binary.BigEndian.Uint64(amountBytes)
+    amount := binary.BigEndian.Uint64(amtBytes)
 
-    // 6. Extract type_code
-    typeCodeInt, err := strconv.ParseUint(parts[5], 10, 8)
+    // e) TypeCode
+    tc, err := strconv.ParseUint(parts[5], 10, 8)
     if err != nil {
-        return nil, fmt.Errorf("invalid type_code: %w", err)
+        return nil, fmt.Errorf("invalid type code: %w", err)
     }
-    typeCode := byte(typeCodeInt)
+    typeCode := byte(tc)
 
-    // 7. Verify 4x OP_DROP
-    if parts[6] != "OP_DROP" || parts[7] != "OP_DROP" || parts[8] != "OP_DROP" || parts[9] != "OP_DROP" {
-        return nil, fmt.Errorf("expected 4x OP_DROP after header fields")
-    }
+    // f) Skip 4 × OP_DROP (parts[6] through parts[9])
 
-    // 8. Extract metadata
-    fmt.Println("🔍 DEBUG: Raw metadata part:", parts[10])
-
-    metadataDecoded, err := hex.DecodeString(parts[10])
+    // g) Metadata
+    metaBytes, err := hex.DecodeString(parts[10])
     if err != nil {
-        return nil, fmt.Errorf("invalid metadata hex: %w", err)
+        return nil, fmt.Errorf("invalid metadata: %w", err)
     }
-    metadata := string(metadataDecoded)
+    metadata := string(metaBytes)
 
-    // 9. Extract timestamp
-    timestampBytes, err := hex.DecodeString(parts[11])
+    // h) Timestamp (8-byte big endian)
+    tsBytes, err := hex.DecodeString(parts[11])
     if err != nil {
         return nil, fmt.Errorf("invalid timestamp: %w", err)
     }
-    if len(timestampBytes) != 8 {
-        return nil, fmt.Errorf("timestamp wrong length")
-    }
-    timestamp := binary.BigEndian.Uint64(timestampBytes)
+    timestamp := binary.BigEndian.Uint64(tsBytes)
 
-    // 10. Verify 2x OP_DROP
-    if parts[12] != "OP_DROP" || parts[13] != "OP_DROP" {
-        return nil, fmt.Errorf("expected 2x OP_DROP after metadata/timestamp")
-    }
-
-    // 11. Programmable logic (1 or OP_TRUE)
-    if parts[14] != "1" && parts[14] != "OP_TRUE" {
-        return nil, fmt.Errorf("unexpected programmable logic: %s", parts[14])
-    }
-
+    // Return only the raw fields—no suffix, no TXID appended.
     return &TokenData{
         TokenID:   tokenID,
         Amount:    amount,

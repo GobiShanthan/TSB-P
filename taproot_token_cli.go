@@ -12,7 +12,6 @@ import (
 	"time"
 	"strconv"
 	"github.com/btcsuite/btcd/btcec/v2"
-    "github.com/btcsuite/btcd/chaincfg"
 
 )
 
@@ -347,18 +346,15 @@ fmt.Println("🔍 DEBUG: --- FULL DEBUG LOG END ---")
 
 func TransferToken(tokenKeyHex string, tokenUTXO *FundingData, tokenData *TokenData, 
                   transferAmount uint64, recipientPubKey *btcec.PublicKey, feeRate int64) (string, *FundingData, error) {
-    // 1. Load the token private key
     token, err := LoadTaprootToken(tokenKeyHex)
-    if err != nil {
+    if (err != nil) {
         return "", nil, fmt.Errorf("failed to load token key: %w", err)
     }
 
-    // ✅ Validate canonical ID before continuing
     if !ValidateCanonicalTokenID(tokenData.TokenID, tokenUTXO.TxID) {
         return "", nil, fmt.Errorf("canonical token ID mismatch: tokenID does not match txid prefix")
     }
 
-    // 2. Create the token transfer transaction
     tx, err := token.SplitToken(
         tokenUTXO.TxID,
         tokenUTXO.Vout,
@@ -372,47 +368,32 @@ func TransferToken(tokenKeyHex string, tokenUTXO *FundingData, tokenData *TokenD
         return "", nil, fmt.Errorf("failed to create transfer transaction: %w", err)
     }
 
-    // 3. Serialize the transaction
     var buf bytes.Buffer
     tx.Serialize(&buf)
     txHex := hex.EncodeToString(buf.Bytes())
 
-    // 4. Save raw transaction for inspection
     err = os.WriteFile("transfer_tx.hex", []byte(txHex), 0644)
     if err != nil {
         return "", nil, fmt.Errorf("failed to save transaction hex: %w", err)
     }
 
-    // 5. Send the raw transaction
     txid, err := RunBitcoinCommand(fmt.Sprintf("sendrawtransaction %s", txHex))
     if err != nil {
         return "", nil, fmt.Errorf("failed to broadcast transaction: %w", err)
     }
 
-    // 6. Create new funding data for the recipient (assumes first output is recipient)
-    recipientPubKeyData := tx.TxOut[0].PkScript
-    addr, err := btcutil.NewAddressTaproot(recipientPubKeyData[2:34], Network)
-    if err != nil {
-        return txid, nil, fmt.Errorf("failed to decode recipient address: %w", err)
-    }
+    // fallback: return x-only pubkey manually
+    xOnly := recipientPubKey.X().Bytes()
+    address := hex.EncodeToString(xOnly)
 
     recipientFunding := &FundingData{
         TxID:    txid,
         Vout:    0,
         Value:   tx.TxOut[0].Value,
-        Address: addr.EncodeAddress(),
+        Address: address,
     }
 
     return txid, recipientFunding, nil
-}
-
-
-// [Modified transfer logic with ownership verification and auto-change handling]
-
-func encodeTaprootAddress(pubkeyBytes []byte, params *chaincfg.Params) (string, error) {
-    hrp := params.Bech32HRPSegwit
-    data := append([]byte{0x01}, pubkeyBytes...)
-    return bech32m.Encode(hrp, data)
 }
 
 func handleTransferCommand() {
@@ -536,12 +517,9 @@ func handleTransferCommand() {
     _ = SaveOutputData(tokenFile, outputData)
     _ = SaveFundingData("recipient_funding.json", recipientFunding)
 
-    tweakedPub := recipientFunding.ScriptHex[4:68] // Extract x-only pubkey portion from script
-    tapAddr, _ := encodeTaprootAddress([]byte(tweakedPub), &chaincfg.TestNet3Params)
-
     fmt.Println("\n✅ Token transfer successful!")
     fmt.Println("  Token       :", outputData.TokenData.TokenID)
-    fmt.Println("  To          :", tapAddr)
+    fmt.Printf("  To (x-only) : %s\n", recipientFunding.Address)
     fmt.Println("  Amount      :", transferAmount)
     fmt.Println("  Transaction :", txid)
     fmt.Println("  Remaining   :", outputData.TokenData.Amount)
@@ -844,233 +822,192 @@ func handleTransferCommand() {
 // 	fmt.Println("\n🎉 All operations completed successfully with no fake fallbacks!")
 // }
 func main() {
-	// Command parsing
-	var command string
-	if len(os.Args) > 1 && !strings.HasPrefix(os.Args[1], "--") {
-		command = os.Args[1]
-		// Remove the command from args for easier processing
-		os.Args = append(os.Args[:1], os.Args[2:]...)
-	}
+    // Command parsing
+    var command string
+    if len(os.Args) > 1 && !strings.HasPrefix(os.Args[1], "--") {
+        command = os.Args[1]
+        // Remove the command from args for easier processing
+        os.Args = append(os.Args[:1], os.Args[2:]...)
+    }
 
-	// Process based on command
-	if command == "transfer" {
-		handleTransferCommand()
-		return
-	}
-	
-	// Default is create if no command specified (or the command is "create")
-	var tokenName = "gobi-token"
-	var tokenAmount uint64 = 1
-	var tokenMetadata = "TSB reveal test"
-	var tokenTypeCode uint8 = 0
+    // Process based on command
+    if command == "transfer" {
+        handleTransferCommand()
+        return
+    }
 
-	var recipientKeyFile string
-	var recipientPubHex string
+    // Default is create if no command specified
+    var tokenName = "gobi-token"
+    var tokenAmount uint64 = 1
+    var tokenMetadata = "TSB reveal test"
+    var tokenTypeCode uint8 = 0
+    var recipientKeyFile, recipientPubHex string
 
-	// --- CLI Argument Parsing ---
-	if len(os.Args) > 1 {
-		for i := 1; i < len(os.Args); i++ {
-			arg := os.Args[i]
-			switch arg {
-			case "--name":
-				tokenName = os.Args[i+1]; i++
-			case "--amount":
-				amt, err := strconv.ParseUint(os.Args[i+1], 10, 64)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "❌ Invalid amount: %v\n", err)
-					os.Exit(1)
-				}
-				tokenAmount = amt; i++
-			case "--metadata":
-				tokenMetadata = os.Args[i+1]; i++
-			case "--typecode":
-				tc, err := strconv.ParseUint(os.Args[i+1], 10, 8)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "❌ Invalid typecode: %v\n", err)
-					os.Exit(1)
-				}
-				tokenTypeCode = uint8(tc); i++
-			case "--recipientkey":
-				recipientKeyFile = os.Args[i+1]; i++
-			case "--recipientpub":
-				recipientPubHex = os.Args[i+1]; i++
-			}
-		}
-	}
+    // CLI Argument Parsing
+    for i := 1; i < len(os.Args); i++ {
+        switch os.Args[i] {
+        case "--name":
+            tokenName = os.Args[i+1]; i++
+        case "--amount":
+            amt, err := strconv.ParseUint(os.Args[i+1], 10, 64)
+            if err != nil {
+                fmt.Fprintf(os.Stderr, "❌ Invalid amount: %v\n", err)
+                os.Exit(1)
+            }
+            tokenAmount = amt; i++
+        case "--metadata":
+            tokenMetadata = os.Args[i+1]; i++
+        case "--typecode":
+            tc, err := strconv.ParseUint(os.Args[i+1], 10, 8)
+            if err != nil {
+                fmt.Fprintf(os.Stderr, "❌ Invalid typecode: %v\n", err)
+                os.Exit(1)
+            }
+            tokenTypeCode = uint8(tc); i++
+        case "--recipientkey":
+            recipientKeyFile = os.Args[i+1]; i++
+        case "--recipientpub":
+            recipientPubHex = os.Args[i+1]; i++
+        }
+    }
 
-	// --- Token Creation ---
-	fmt.Println("\n🔄 Creating token...")
+    // --- Token Creation ---
+    fmt.Println("\n🔄 Creating token...")
+    var output *OutputData
+    var err error
 
-	var output *OutputData
-	var err error
+    if recipientKeyFile != "" || recipientPubHex != "" {
+        // Secure token (CHECKSIG)
+        var pubKey *btcec.PublicKey
+        if recipientKeyFile != "" {
+            privHex, err := os.ReadFile(recipientKeyFile)
+            if err != nil {
+                fmt.Fprintf(os.Stderr, "❌ Failed to read recipient key: %v\n", err)
+                os.Exit(1)
+            }
+            privKey, _ := btcec.PrivKeyFromBytes(bytes.TrimSpace(privHex))
+            pubKey = privKey.PubKey()
+        } else {
+            pubBytes, err := hex.DecodeString(recipientPubHex)
+            if err != nil {
+                fmt.Fprintf(os.Stderr, "❌ Invalid recipient pubkey: %v\n", err)
+                os.Exit(1)
+            }
+            pubKey, err = btcec.ParsePubKey(pubBytes)
+            if err != nil {
+                fmt.Fprintf(os.Stderr, "❌ Failed to parse pubkey: %v\n", err)
+                os.Exit(1)
+            }
+        }
 
-	if recipientKeyFile != "" || recipientPubHex != "" {
-		// 🔐 Secure token (CHECKSIG-based)
-		var pubKey *btcec.PublicKey
+        token := &TokenData{
+            TokenID:   tokenName,
+            Amount:    tokenAmount,
+            Metadata:  tokenMetadata,
+            TypeCode:  tokenTypeCode,
+            Timestamp: uint64(time.Now().Unix()),
+        }
+        issuerToken, err := NewTaprootToken()
+        if err != nil {
+            fmt.Fprintf(os.Stderr, "❌ Token key gen failed: %v\n", err)
+            os.Exit(1)
+        }
+        if err = issuerToken.SavePrivateKey("token_key.hex"); err != nil {
+            fmt.Fprintf(os.Stderr, "❌ Could not save token key: %v\n", err)
+            os.Exit(1)
+        }
+        tree, err := issuerToken.CreateTaprootOutputWithOwnership(token, pubKey)
+        if err != nil {
+            fmt.Fprintf(os.Stderr, "❌ Script creation failed: %v\n", err)
+            os.Exit(1)
+        }
+        addr, err := issuerToken.GetTaprootAddress()
+        if err != nil {
+            fmt.Fprintf(os.Stderr, "❌ Address gen failed: %v\n", err)
+            os.Exit(1)
+        }
+        output = &OutputData{
+            Address:         addr,
+            ScriptHex:       hex.EncodeToString(tree.Script),
+            ControlBlockHex: hex.EncodeToString(tree.ControlBlock),
+            TokenData:       *token,
+        }
+        if err = SaveOutputData("taproot_output.json", output); err != nil {
+            fmt.Fprintf(os.Stderr, "❌ Failed to save output: %v\n", err)
+            os.Exit(1)
+        }
+        fmt.Println("✅ Secure Token Created:")
+        fmt.Println("  Address:", addr)
+        fmt.Println("  Token ID:", tokenName)
+        fmt.Println("  Amount:", tokenAmount)
+        fmt.Println("  Metadata:", tokenMetadata)
+    } else {
+        // OP_TRUE fallback
+        output, err = CreateToken(tokenName, tokenAmount, tokenMetadata, tokenTypeCode)
+        if err != nil {
+            fmt.Fprintf(os.Stderr, "❌ Error creating token: %v\n", err)
+            os.Exit(1)
+        }
+        fmt.Println("✅ Token created successfully")
+    }
 
-		if recipientKeyFile != "" {
-			privHex, err := os.ReadFile(recipientKeyFile)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "❌ Failed to read recipient key: %v\n", err)
-				os.Exit(1)
-			}
-			privKey, _ := btcec.PrivKeyFromBytes(bytes.TrimSpace(privHex))
-			pubKey = privKey.PubKey()
-		} else {
-			pubBytes, err := hex.DecodeString(recipientPubHex)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "❌ Invalid recipient pubkey: %v\n", err)
-				os.Exit(1)
-			}
-			pubKey, err = btcec.ParsePubKey(pubBytes)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "❌ Failed to parse pubkey: %v\n", err)
-				os.Exit(1)
-			}
-		}
+    // --- Funding ---
+    fmt.Println("\n🔄 Funding the address...")
+    funding, err := FundAddress(output.Address, 0.00000850)
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "❌ Error funding address: %v\n", err)
+        os.Exit(1)
+    }
+    fmt.Printf("✅ Address funded: %s:%d (%d sats)\n", funding.TxID, funding.Vout, funding.Value)
 
-		token := &TokenData{
-			TokenID:   tokenName,
-			Amount:    tokenAmount,
-			Metadata:  tokenMetadata,
-			TypeCode:  tokenTypeCode,
-			Timestamp: uint64(time.Now().Unix()),
-		}
+    // --- Generate destination ---
+    fmt.Println("\n🔄 Generating destination address...")
+    newAddr, err := RunBitcoinCommand("getnewaddress")
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "❌ Error generating new address: %v\n", err)
+        os.Exit(1)
+    }
+    fmt.Println("✅ Destination address:", newAddr)
 
-		issuerToken, err := NewTaprootToken()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "❌ Token key gen failed: %v\n", err)
-			os.Exit(1)
-		}
-		err = issuerToken.SavePrivateKey("token_key.hex")
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "❌ Could not save token key: %v\n", err)
-			os.Exit(1)
-		}
+    // --- Spend script-path ---
+    fmt.Println("\n🔄 Spending token...")
+    txid, err := SpendToken(newAddr)
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "❌ Error spending token: %v\n", err)
+        os.Exit(1)
+    }
+    fmt.Println("✅ Token spent on-chain:", txid)
 
-		scriptTree, err := issuerToken.CreateTaprootOutputWithOwnership(token, pubKey)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "❌ Script creation failed: %v\n", err)
-			os.Exit(1)
-		}
+    // --- Reveal data ---
+    fmt.Println("\n🔄 Revealing embedded token data...")
+    keyHex, err := os.ReadFile("token_key.hex")
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "❌ Could not read token_key.hex: %v\n", err)
+        os.Exit(1)
+    }
+    tkn, err := LoadTaprootToken(strings.TrimSpace(string(keyHex)))
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "❌ Could not load TaprootToken: %v\n", err)
+        os.Exit(1)
+    }
+    rawHex, err := os.ReadFile("spending_tx.hex")
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "❌ Could not read spending_tx.hex: %v\n", err)
+        os.Exit(1)
+    }
+    revealed, err := tkn.RevealTokenDataFromHex(string(rawHex))
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "❌ Error extracting on-chain data: %v\n", err)
+        os.Exit(1)
+    }
 
-		address, err := issuerToken.GetTaprootAddress()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "❌ Taproot address gen failed: %v\n", err)
-			os.Exit(1)
-		}
+    // Print only raw fields—TokenID remains just the name
+    fmt.Println("\n🔓 Revealed Token Data:")
+    fmt.Printf("  TokenID   : %s\n", revealed.TokenID)
+    fmt.Printf("  Amount    : %d\n", revealed.Amount)
+    fmt.Printf("  TypeCode  : %d\n", revealed.TypeCode)
+    fmt.Printf("  Metadata  : %s\n", revealed.Metadata)
+    fmt.Printf("  Timestamp : %d\n", revealed.Timestamp)
 
-		output = &OutputData{
-			Address:         address,
-			ScriptHex:       hex.EncodeToString(scriptTree.Script),
-			ControlBlockHex: hex.EncodeToString(scriptTree.ControlBlock),
-			TokenData:       *token,
-		}
-
-		err = SaveOutputData("taproot_output.json", output)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "❌ Failed to save output: %v\n", err)
-			os.Exit(1)
-		}
-
-		fmt.Println("✅ Secure Token Created (CHECKSIG enforced):")
-		fmt.Println("  Address:", address)
-		fmt.Println("  Token ID:", tokenName)
-		fmt.Println("  Amount:", tokenAmount)
-		fmt.Println("  Metadata:", tokenMetadata)
-
-	} else {
-		// 🪙 Fallback: OP_TRUE mode
-		output, err = CreateToken(tokenName, tokenAmount, tokenMetadata, tokenTypeCode)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "❌ Error creating token: %v\n", err)
-			os.Exit(1)
-		}
-		fmt.Println("✅ Token created successfully")
-	}
-
-	// --- Funding ---
-	fmt.Println("\n🔄 Funding the address...")
-	funding, err := FundAddress(output.Address, 0.00000850)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Error funding address: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Printf("✅ Address funded: %s:%d (%d sats)\n", funding.TxID, funding.Vout, funding.Value)
-
-	// --- Destination Address ---
-	fmt.Println("\n🔄 Generating destination address...")
-	newAddress, err := RunBitcoinCommand("getnewaddress")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Error generating new address: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Println("✅ Destination address:", newAddress)
-
-	// --- Spend Script (still OP_TRUE compatible for now) ---
-	fmt.Println("\n🔄 Spending token (script-path spend)...")
-	txid, err := SpendToken(newAddress)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Error spending token: %v\n", err)
-		os.Exit(1)
-	}
-	fmt.Println("✅ Token spent on-chain:", txid)
-
-	// --- Update with canonical ID using reveal txid ---
-	output, err = LoadOutputData("taproot_output.json")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "⚠️ Warning: Failed to load output data: %v\n", err)
-	} else {
-		originalName := output.TokenData.TokenID
-		UpdateWithCanonicalTokenID(&output.TokenData, txid)
-		fmt.Printf("✅ Token canonical ID created: %s (from %s)\n", 
-			output.TokenData.TokenID, originalName)
-		
-		// Save updated token data
-		err = SaveOutputData("taproot_output.json", output)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "⚠️ Warning: Failed to save canonical token ID: %v\n", err)
-		}
-	}
-
-	// --- Reveal Data ---
-	fmt.Println("\n🔄 Revealing embedded token data from on-chain spending_tx.hex...")
-	keyHex, err := os.ReadFile("token_key.hex")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Could not read token_key.hex: %v\n", err)
-		os.Exit(1)
-	}
-	tkn, err := LoadTaprootToken(strings.TrimSpace(string(keyHex)))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Could not load TaprootToken: %v\n", err)
-		os.Exit(1)
-	}
-	rawHex, err := os.ReadFile("spending_tx.hex")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Could not read spending_tx.hex: %v\n", err)
-		os.Exit(1)
-	}
-	revealed, err := tkn.RevealTokenDataFromHex(string(rawHex))
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Error extracting on-chain data: %v\n", err)
-		os.Exit(1)
-	}
-
-fmt.Println("\n🔓 Revealed Token Data:")
-fmt.Printf("  TokenID : %s\n", revealed.TokenID)
-fmt.Printf("  Amount  : %d\n", revealed.Amount)
-fmt.Printf("  Metadata: %s\n", revealed.Metadata)
-fmt.Printf("  Timestamp: %d\n", revealed.Timestamp)
-fmt.Printf("  TypeCode: %d\n", revealed.TypeCode)
-
-// ✅ Validate canonical ID matches reveal TXID
-if !ValidateCanonicalTokenID(revealed.TokenID, txid) {
-	fmt.Fprintf(os.Stderr, "❌ TokenID suffix mismatch! Expected token ID to match reveal TXID prefix.\n")
-	os.Exit(1)
+    fmt.Println("\n🎉 All operations completed successfully!")
 }
-fmt.Println("✅ Canonical token ID validated successfully.")
-
-
-	fmt.Println("\n🎉 All operations completed successfully with no fake fallbacks!")
-}
-
