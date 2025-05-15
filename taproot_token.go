@@ -8,6 +8,7 @@ import (
 	"errors"
 	"os"
 	"fmt"
+    "time"
     "strings"
     "strconv"
 	"github.com/btcsuite/btcd/btcec/v2"
@@ -35,6 +36,49 @@ type TokenData struct {
 	Metadata  string
 	Timestamp uint64
 }
+
+func UpdateWithCanonicalTokenID(tokenData *TokenData, revealTxID string) {
+    // Extract original name without any txid suffix
+    originalName := tokenData.TokenID
+    if strings.Contains(originalName, ":") {
+        parts := strings.Split(originalName, ":")
+        originalName = parts[0]
+    }
+    
+    // Remove null padding
+    originalName = strings.TrimRight(originalName, "\x00")
+    
+    // Use first 8 chars of the revealTxID
+    shortRevealID := revealTxID
+    if len(revealTxID) > 8 {
+        shortRevealID = revealTxID[:8]
+    }
+    
+    // Format: NAME:REVEAL8
+    tokenData.TokenID = fmt.Sprintf("%s:%s", originalName, shortRevealID)
+}
+
+// ValidateCanonicalTokenID verifies the token ID suffix matches the reveal TXID
+func ValidateCanonicalTokenID(tokenID string, revealTxID string) bool {
+    // Check if TokenID has the expected format
+    parts := strings.Split(tokenID, ":")
+    if len(parts) != 2 {
+        return false
+    }
+    
+    // Extract the TXID portion from TokenID
+    tokenIDSuffix := parts[1]
+    
+    // Get the first N chars of the actual txid (matching suffix length)
+    shortTxID := revealTxID
+    if len(revealTxID) > len(tokenIDSuffix) {
+        shortTxID = revealTxID[:len(tokenIDSuffix)]
+    }
+    
+    // Validate they match
+    return tokenIDSuffix == shortTxID
+}
+
 
 
 func (t *TokenData) ToBytes() []byte {
@@ -299,6 +343,126 @@ func (t *TaprootToken) CreateScriptPathSpendingTx(
     return tx, nil
 }
 
+// SplitToken creates a transaction that splits a token into transfer and change outputs
+func (t *TaprootToken) SplitToken(
+    prevTxID string,
+    prevTxIndex uint32,
+    prevAmount int64,
+    tokenData *TokenData,
+    transferAmount uint64,
+    recipientPubKey *btcec.PublicKey,
+    feeRate int64,
+) (*wire.MsgTx, error) {
+    // Validate the transfer amount
+    if transferAmount > tokenData.Amount {
+        return nil, errors.New("transfer amount exceeds token balance")
+    }
+    if transferAmount == 0 {
+        return nil, errors.New("transfer amount must be greater than zero")
+    }
+    
+    // Calculate change amount
+    changeAmount := tokenData.Amount - transferAmount
+    
+    // Create new token data for recipient and change - preserve canonical ID
+    recipientTokenData := &TokenData{
+        TokenID:   tokenData.TokenID,     // Keep canonical ID
+        Amount:    transferAmount,
+        TypeCode:  tokenData.TypeCode,
+        Metadata:  tokenData.Metadata,
+        Timestamp: uint64(time.Now().Unix()), // Update timestamp
+    }
+    
+    // 1. Create the outpoint
+    prevHash, err := chainhash.NewHashFromStr(prevTxID)
+    if err != nil {
+        return nil, err
+    }
+    outpoint := wire.NewOutPoint(prevHash, prevTxIndex)
+    txIn := wire.NewTxIn(outpoint, nil, nil)
+    
+    // 2. Create transaction
+    tx := wire.NewMsgTx(2)
+    tx.AddTxIn(txIn)
+    
+    // 3. Add recipient output with token
+    recipientScriptTree, err := t.CreateTaprootOutputWithOwnership(recipientTokenData, recipientPubKey)
+    if err != nil {
+        return nil, fmt.Errorf("failed to create recipient script: %w", err)
+    }
+    
+    recipientPubKeyBytes := recipientScriptTree.TweakedPubKey.SerializeCompressed()[1:33]
+    recipientAddr, err := btcutil.NewAddressTaproot(recipientPubKeyBytes, Network)
+    if err != nil {
+        return nil, fmt.Errorf("failed to create recipient address: %w", err)
+    }
+    
+    recipientScript, err := txscript.PayToAddrScript(recipientAddr)
+    if err != nil {
+        return nil, fmt.Errorf("failed to create recipient script: %w", err)
+    }
+    
+    // Use minimum dust amount for the output
+    const minOutputAmount = 546
+    recipientTxOut := wire.NewTxOut(minOutputAmount, recipientScript)
+    tx.AddTxOut(recipientTxOut)
+    
+    // 4. Add change output if needed
+    if changeAmount > 0 {
+        changeTokenData := &TokenData{
+            TokenID:   tokenData.TokenID,     // Keep canonical ID
+            Amount:    changeAmount,
+            TypeCode:  tokenData.TypeCode,
+            Metadata:  tokenData.Metadata,
+            Timestamp: uint64(time.Now().Unix()), // Update timestamp
+        }
+        
+        changeScriptTree, err := t.CreateTaprootOutputWithOwnership(changeTokenData, t.PublicKey)
+        if err != nil {
+            return nil, fmt.Errorf("failed to create change script: %w", err)
+        }
+        
+        changePubKeyBytes := changeScriptTree.TweakedPubKey.SerializeCompressed()[1:33]
+        changeAddr, err := btcutil.NewAddressTaproot(changePubKeyBytes, Network)
+        if err != nil {
+            return nil, fmt.Errorf("failed to create change address: %w", err)
+        }
+        
+        changeScript, err := txscript.PayToAddrScript(changeAddr)
+        if err != nil {
+            return nil, fmt.Errorf("failed to create change script: %w", err)
+        }
+        
+        changeTxOut := wire.NewTxOut(minOutputAmount, changeScript)
+        tx.AddTxOut(changeTxOut)
+    }
+    
+    // 5. Calculate fee
+    estimatedSize := 100 + (len(tx.TxOut) * 50) // Base size + output sizes
+    estimatedFee := (feeRate * int64(estimatedSize)) / 1000
+    
+    // Ensure minimum fee
+    if estimatedFee < 300 {
+        estimatedFee = 300
+    }
+    
+    // Verify sufficient funds
+    outputsAmount := int64(len(tx.TxOut)) * minOutputAmount
+    if outputsAmount+estimatedFee > prevAmount {
+        return nil, fmt.Errorf("insufficient funds: need %d, have %d", 
+            outputsAmount+estimatedFee, prevAmount)
+    }
+    
+    // 6. Set up the witness for script-path spend
+    witness := wire.TxWitness{
+        t.ScriptTree.Script,       // Script 
+        t.ScriptTree.ControlBlock, // Control block
+    }
+    tx.TxIn[0].Witness = witness
+    
+    return tx, nil
+}
+
 
 func (t *TaprootToken) SavePrivateKey(filename string) error {
 	privKeyHex := hex.EncodeToString(t.PrivateKey.Serialize())
@@ -516,4 +680,81 @@ func (t *TaprootToken) RevealTokenDataFromHex(rawTxHex string) (*TokenData, erro
         Metadata:  metadata,
         Timestamp: timestamp,
     }, nil
+}
+
+
+
+func (t *TaprootToken) CreateTaprootOutputWithOwnership(
+	token *TokenData,
+	recipientPubKey *btcec.PublicKey,
+) (*TaprootScriptTree, error) {
+	builder := txscript.NewScriptBuilder()
+
+	// TSB-P Pattern Start
+	builder.AddOp(txscript.OP_TRUE)
+	builder.AddOp(txscript.OP_IF)
+
+	builder.AddData([]byte("TSB"))                            // Marker
+	builder.AddData([]byte(token.TokenID))                    // TokenID
+	amountBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(amountBytes, token.Amount)
+	builder.AddData(amountBytes)                              // Amount
+	builder.AddData([]byte{token.TypeCode})                   // TypeCode
+
+	builder.AddOp(txscript.OP_DROP)
+	builder.AddOp(txscript.OP_DROP)
+	builder.AddOp(txscript.OP_DROP)
+	builder.AddOp(txscript.OP_DROP)
+
+	builder.AddData([]byte(token.Metadata))                   // Metadata
+	timestampBytes := make([]byte, 8)
+	binary.BigEndian.PutUint64(timestampBytes, token.Timestamp)
+	builder.AddData(timestampBytes)                           // Timestamp
+
+	builder.AddOp(txscript.OP_DROP)
+	builder.AddOp(txscript.OP_DROP)
+
+	// 👇 Ownership: require CHECKSIG for recipient pubkey
+	builder.AddData(recipientPubKey.SerializeCompressed())    // pubkey
+	builder.AddOp(txscript.OP_CHECKSIG)
+
+	builder.AddOp(txscript.OP_ENDIF)
+
+	// Compile script
+	script, err := builder.Script()
+	if err != nil {
+		return nil, err
+	}
+
+	// Taproot leaf + control block
+	var sizeBuf [binary.MaxVarintLen64]byte
+	sz := binary.PutUvarint(sizeBuf[:], uint64(len(script)))
+	leafInput := make([]byte, 1+sz+len(script))
+	leafInput[0] = TapscriptLeafVersion
+	copy(leafInput[1:], sizeBuf[:sz])
+	copy(leafInput[1+sz:], script)
+
+	leafHash := TaggedHash(TapscriptLeafTaggedHash, leafInput)
+	merkleRoot := leafHash
+	tweakedPubKey := txscript.ComputeTaprootOutputKey(t.PublicKey, merkleRoot)
+
+	internalX := t.PublicKey.SerializeCompressed()[1:33]
+	comp := tweakedPubKey.SerializeCompressed()
+	parity := byte(0)
+	if comp[0] == 0x03 {
+		parity = 1
+	}
+	cb0 := TapscriptLeafVersion | parity
+	controlBlock := append([]byte{cb0}, internalX...)
+
+	tree := &TaprootScriptTree{
+		Script:        script,
+		LeafHash:      leafHash,
+		MerkleRoot:    merkleRoot,
+		TweakedPubKey: tweakedPubKey,
+		ControlBlock:  controlBlock,
+	}
+
+	t.ScriptTree = tree
+	return tree, nil
 }
