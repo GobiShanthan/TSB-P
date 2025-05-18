@@ -1,0 +1,12 @@
+{
+  "address": "tb1punhf44pdqqx9p7nlesutrf28waccv50jx76qean0xau9mpmcxgusv9t2pl",
+  "scriptHex": "",
+  "controlBlockHex": "",
+  "tokenData": {
+    "TokenID": "TORRAMTEST",
+    "Amount": 9999950000,
+    "TypeCode": 8,
+    "Metadata": "Torram Network native token",
+    "Timestamp": 1747533153
+  }
+}

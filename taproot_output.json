@@ -1,12 +1,12 @@
 {
-  "address": "tb1pln3ska0uqw0h9996jgl3dfn3ecw9c500rzkuv45ueuhff87tqgkq73ayc3",
-  "scriptHex": "5163035453420a676f62692d746f6b656e08000000012a05f20000757575750f5453422072657665616c2074657374080000000068292a51757521026bb3dcebeff8f0327ea4e3d6bd22c1629ee2fcc485f04304f788f6a1f3df2038ac68",
-  "controlBlockHex": "c0a2ce554e232d30218c97fe35c9b66b09893824035e870aad401bbe284096d4cd",
+  "address": "tb1pm4uxa6x2n0dc9hlg953hqyymekgqrmkqe5kyf7ppxhgu0732r9gqph9mdf",
+  "scriptHex": "51630354534210544f5252414d000000000000000000000800000002540be40058757575751b546f7272616d204e6574776f726b206e617469766520746f6b656e0800000000682966e775755168",
+  "controlBlockHex": "c139f74c9af8f22a34e0fdb87b01908a7fbd4f909702428890e822992d71a96f7c",
   "tokenData": {
-    "TokenID": "gobi-token",
-    "Amount": 5000000000,
-    "TypeCode": 0,
-    "Metadata": "TSB reveal test",
-    "Timestamp": 1747528273
+    "TokenID": "TORRAM\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000",
+    "Amount": 10000000000,
+    "TypeCode": 8,
+    "Metadata": "Torram Network native token",
+    "Timestamp": 1747543783
   }
 }
