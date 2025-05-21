@@ -9,6 +9,7 @@ import (
 	"os"
 	"fmt"
     "time"
+    "encoding/json"
     "strings"
     "strconv"
 	"github.com/btcsuite/btcd/btcec/v2"
@@ -152,6 +153,7 @@ type TaprootScriptTree struct {
 	MerkleRoot    []byte
 	TweakedPubKey *btcec.PublicKey
 	ControlBlock  []byte
+    InternalKey   *btcec.PublicKey
 }
 
 type TaprootToken struct {
@@ -728,4 +730,126 @@ func (t *TaprootToken) CreateTaprootOutputWithOwnership(
 
 	t.ScriptTree = tree
 	return tree, nil
+}
+
+// Add to taproot_token.go
+
+// BIP32 derivation path constants
+const (
+    // Base derivation paths (m/86' is Taproot path from BIP-86)
+    TokenPathMainnet = "m/86'/0'/0'"  // For mainnet
+    TokenPathTestnet = "m/86'/1'/0'"  // For testnet
+    
+    // We'll use account 0 and change 0 by default
+    TokenDefaultAccount = 0
+    TokenDefaultChange = 0
+)
+
+// GetTokenDerivationPath returns a deterministic path for a token
+func GetTokenDerivationPath(tokenID string, isTestnet bool) string {
+    // Create a deterministic index based on token ID
+    tokenHashBytes := sha256.Sum256([]byte(tokenID))
+    
+    // Use the first 4 bytes of the hash as our child index
+    // We mask the most significant bit to ensure it's a non-hardened index
+    childIndex := binary.BigEndian.Uint32(tokenHashBytes[:4]) & 0x7FFFFFFF
+    
+    // Select the appropriate base path based on network
+    basePath := TokenPathMainnet
+    if isTestnet {
+        basePath = TokenPathTestnet
+    }
+    
+    // Construct full derivation path:
+    // m/86'/0'/0'/0/childIndex (mainnet)
+    // m/86'/1'/0'/0/childIndex (testnet)
+    return fmt.Sprintf("%s/%d/%d", basePath, TokenDefaultChange, childIndex)
+}
+
+// DeriveTokenKeyFromWallet uses Bitcoin Core's built-in wallet to create deterministic keys
+func DeriveTokenKeyFromWallet(tokenID string) (*TaprootToken, string, error) {
+    // Get derivation path for this token
+    path := GetTokenDerivationPath(tokenID, Network == &chaincfg.TestNet3Params)
+    
+    // Create a descriptive label that includes the path and token ID for future recovery
+    addressLabel := fmt.Sprintf("Token:%s:Path:%s", tokenID, path)
+    
+    // Get a new address from the wallet
+    fmt.Println("🔍 DEBUG: Getting new address from wallet...")
+    addrOutput, err := RunBitcoinCommand(fmt.Sprintf("getnewaddress \"%s\" \"bech32m\"", addressLabel))
+    if err != nil {
+        return nil, "", fmt.Errorf("failed to get new address: %w", err)
+    }
+    fmt.Println("✅ Got address:", addrOutput)
+    
+    // Get the pubkey for this address
+    fmt.Println("🔍 DEBUG: Getting address info...")
+    addrInfoOutput, err := RunBitcoinCommand(fmt.Sprintf("getaddressinfo %s", addrOutput))
+    if err != nil {
+        return nil, "", fmt.Errorf("failed to get address info: %w", err)
+    }
+    
+    // Print the address info for debugging
+    fmt.Println("🔍 DEBUG: Address info:", addrInfoOutput)
+    
+    var addrInfo map[string]interface{}
+    if err := json.Unmarshal([]byte(addrInfoOutput), &addrInfo); err != nil {
+        return nil, "", fmt.Errorf("failed to parse address info: %w", err)
+    }
+    
+    // Try to get pubkey from either pubkey or "embedded" section
+    var pubkeyHex string
+    var ok bool
+    if pubkeyHex, ok = addrInfo["pubkey"].(string); !ok {
+        // For Taproot addresses, the pubkey might be in the embedded section
+        embedded, ok := addrInfo["embedded"].(map[string]interface{})
+        if ok {
+            pubkeyHex, ok = embedded["inner_pubkey"].(string)
+            if !ok {
+                fmt.Println("🔍 DEBUG: Address info keys:", addrInfo)
+                return nil, "", fmt.Errorf("no pubkey found in address info or embedded section")
+            }
+        } else {
+            // Direct fallback to using a new key instead
+            fmt.Println("🔍 DEBUG: No embedded info, generating new key")
+            token, err := NewTaprootToken()
+            if err != nil {
+                return nil, "", fmt.Errorf("failed to create new token: %w", err)
+            }
+            return token, addrOutput, nil
+        }
+    }
+    
+    // Parse the pubkey
+    pubkeyBytes, err := hex.DecodeString(pubkeyHex)
+    if err != nil {
+        return nil, "", fmt.Errorf("invalid pubkey hex: %w", err)
+    }
+    
+    pubkey, err := btcec.ParsePubKey(pubkeyBytes)
+    if err != nil {
+        return nil, "", fmt.Errorf("failed to parse pubkey: %w", err)
+    }
+    
+    // Create a TaprootToken with the pubkey
+    token := &TaprootToken{
+        PublicKey: pubkey,
+    }
+    
+    // Also try to get the private key - this may fail if wallet is locked
+    privKeyWIF, err := RunBitcoinCommand(fmt.Sprintf("dumpprivkey %s", addrOutput))
+    if err == nil {
+        // If we got the private key, let's use it
+        wif, err := btcutil.DecodeWIF(privKeyWIF)
+        if err == nil {
+            privKey, _ := btcec.PrivKeyFromBytes(wif.PrivKey.Serialize())
+            token.PrivateKey = privKey
+        }
+    }
+    
+    // Store the path for tracking
+    setLabelCmd := fmt.Sprintf("setlabel %s \"TokenPath:%s:%s\"", addrOutput, path, tokenID)
+    _, _ = RunBitcoinCommand(setLabelCmd)
+    
+    return token, addrOutput, nil
 }

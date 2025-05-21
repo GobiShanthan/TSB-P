@@ -1,12 +1,14 @@
 {
-  "address": "tb1pm4uxa6x2n0dc9hlg953hqyymekgqrmkqe5kyf7ppxhgu0732r9gqph9mdf",
-  "scriptHex": "51630354534210544f5252414d000000000000000000000800000002540be40058757575751b546f7272616d204e6574776f726b206e617469766520746f6b656e0800000000682966e775755168",
-  "controlBlockHex": "c139f74c9af8f22a34e0fdb87b01908a7fbd4f909702428890e822992d71a96f7c",
+  "address": "tb1pm7h89z2wgx36h840jsxmm5cfumyfw05lycraurkqsan029duneysf7nvrk",
+  "scriptHex": "516303545342106469726563742d77616c6c65740000000800000000000000010075757575124469726563742057616c6c657420546573740800000000682d36af75755168",
+  "controlBlockHex": "c0b1639520a8f3b0106f50431310251de9638bd1097331013c99b38dd4dcb02dee",
   "tokenData": {
-    "TokenID": "TORRAM\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000",
-    "Amount": 10000000000,
-    "TypeCode": 8,
-    "Metadata": "Torram Network native token",
-    "Timestamp": 1747543783
-  }
+    "TokenID": "direct-wallet\u0000\u0000\u0000",
+    "Amount": 1,
+    "TypeCode": 0,
+    "Metadata": "Direct Wallet Test",
+    "Timestamp": 1747793583
+  },
+  "derivationPath": "m/86'/1'/0'/0/1444186463",
+  "walletAddress": "tb1p7zmygcqh6m4se3lys656lxlg4memk6vcuckpntp8jthw55vxzftspcc7lg"
 }
