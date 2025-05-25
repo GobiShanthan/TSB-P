@@ -346,6 +346,247 @@ func FundAddress(address string, btcAmount float64) (*FundingData, error) {
 	return nil, errors.New("no matching output found")
 }
 
+// DescriptorWalletTransferToken - transfers a detected token using wallet signing for descriptor wallets
+func DescriptorWalletTransferToken(tokenUTXO *FundingData, tokenData *TokenData,
+    transferAmount uint64, recipientAddress string, feeRate int64) (string, *FundingData, error) {
+    
+    fmt.Println("🔧 Descriptor wallet transfer for detected token...")
+    fmt.Printf("🔍 Token UTXO address: %s\n", tokenUTXO.Address)
+    
+    // For descriptor wallets, we can't extract the private key directly
+    // Instead, we'll create a transaction and let the wallet sign what it can
+    
+    fmt.Println("🔄 Creating transaction for wallet signing...")
+    
+    // Create a basic transaction structure
+    prevHash, err := chainhash.NewHashFromStr(tokenUTXO.TxID)
+    if err != nil {
+        return "", nil, fmt.Errorf("invalid UTXO TXID: %w", err)
+    }
+    
+    outpoint := wire.NewOutPoint(prevHash, tokenUTXO.Vout)
+    txIn := wire.NewTxIn(outpoint, nil, nil)
+
+    tx := wire.NewMsgTx(2)
+    tx.AddTxIn(txIn)
+
+    // Add output to recipient address
+    recipientAddr, err := btcutil.DecodeAddress(recipientAddress, Network)
+    if err != nil {
+        return "", nil, fmt.Errorf("invalid recipient address: %w", err)
+    }
+    
+    recipientScript, err := txscript.PayToAddrScript(recipientAddr)
+    if err != nil {
+        return "", nil, fmt.Errorf("failed to create recipient script: %w", err)
+    }
+
+    // Calculate fee and output amount
+    const dustAmount = int64(546)
+    fee := int64(1000)
+    outputAmount := tokenUTXO.Value - fee
+    
+    if outputAmount < dustAmount {
+        return "", nil, fmt.Errorf("insufficient funds: UTXO value %d too small after fee %d", tokenUTXO.Value, fee)
+    }
+
+    tx.AddTxOut(wire.NewTxOut(outputAmount, recipientScript))
+
+    // First, try to get the wallet to sign this basic transaction
+    var buf bytes.Buffer
+    tx.Serialize(&buf)
+    txHex := hex.EncodeToString(buf.Bytes())
+
+    fmt.Println("🔐 Attempting wallet signing...")
+    signedTxJSON, err := RunBitcoinCommand(fmt.Sprintf("signrawtransactionwithwallet %s", txHex))
+    if err != nil {
+        return "", nil, fmt.Errorf("failed to sign with wallet: %w", err)
+    }
+
+    var signed struct {
+        Hex      string `json:"hex"`
+        Complete bool   `json:"complete"`
+        Errors   []struct {
+            Txid  string `json:"txid"`
+            Vout  int    `json:"vout"`
+            Error string `json:"error"`
+        } `json:"errors"`
+    }
+    if err := json.Unmarshal([]byte(signedTxJSON), &signed); err != nil {
+        return "", nil, fmt.Errorf("failed to parse signed tx: %w", err)
+    }
+
+    if !signed.Complete {
+        fmt.Println("⚠️ Wallet couldn't fully sign the transaction")
+        if len(signed.Errors) > 0 {
+            for _, e := range signed.Errors {
+                fmt.Printf("   Error: %s\n", e.Error)
+            }
+        }
+        return "", nil, fmt.Errorf("wallet signing incomplete - this UTXO might not be spendable by the wallet")
+    }
+
+    // If we get here, the wallet was able to sign it (shouldn't happen for Taproot script path)
+    fmt.Println("✅ Wallet signed the transaction successfully")
+
+    // Try to broadcast the signed transaction
+    txid, err := RunBitcoinCommand(fmt.Sprintf("sendrawtransaction %s", signed.Hex))
+    if err != nil {
+        return "", nil, fmt.Errorf("failed to broadcast transaction: %w", err)
+    }
+
+    recipientFunding := &FundingData{
+        TxID:    txid,
+        Vout:    0,
+        Value:   outputAmount,
+        Address: recipientAddress,
+    }
+
+    fmt.Printf("✅ Token transferred successfully!\n")
+    fmt.Printf("   Transaction: %s\n", txid)
+    fmt.Printf("   Recipient will receive the token at: %s\n", recipientAddress)
+
+    return txid, recipientFunding, nil
+}
+
+// AlternativeTransferToken - Alternative approach for tokens that can't be spent normally
+func AlternativeTransferToken(tokenUTXO *FundingData, tokenData *TokenData,
+    transferAmount uint64, recipientAddress string, feeRate int64) (string, *FundingData, error) {
+    
+    fmt.Println("🔧 Alternative transfer approach...")
+    fmt.Printf("🔍 This will create a new token and send the Bitcoin value to the recipient\n")
+    fmt.Printf("🔍 The recipient can then extract the token data from the transaction\n")
+    
+    // Get a funding UTXO from the wallet (not the token UTXO)
+    unspentJSON, err := RunBitcoinCommand("listunspent")
+    if err != nil {
+        return "", nil, fmt.Errorf("failed to list unspent outputs: %w", err)
+    }
+
+    var unspent []map[string]interface{}
+    if err := json.Unmarshal([]byte(unspentJSON), &unspent); err != nil {
+        return "", nil, fmt.Errorf("failed to parse unspent outputs: %w", err)
+    }
+
+    // Find a suitable UTXO that's NOT the token UTXO
+    var fundingUTXO map[string]interface{}
+    for _, utxo := range unspent {
+        txid, _ := utxo["txid"].(string)
+        vout, _ := utxo["vout"].(float64)
+        
+        // Skip the token UTXO
+        if txid == tokenUTXO.TxID && uint32(vout) == tokenUTXO.Vout {
+            continue
+        }
+        
+        amount, _ := utxo["amount"].(float64)
+        if amount > 0.00001 { // At least 1000 sats
+            fundingUTXO = utxo
+            break
+        }
+    }
+    
+    if fundingUTXO == nil {
+        return "", nil, fmt.Errorf("no suitable funding UTXO found")
+    }
+    
+    fundingTxid, _ := fundingUTXO["txid"].(string)
+    fundingVout := uint32(fundingUTXO["vout"].(float64))
+    fundingAmount := int64(fundingUTXO["amount"].(float64) * 100000000)
+    
+    fmt.Printf("🔍 Using funding UTXO: %s:%d (%d sats)\n", fundingTxid, fundingVout, fundingAmount)
+    
+    // Create a new token with the same data but for the recipient
+    recipientToken, err := NewTaprootToken()
+    if err != nil {
+        return "", nil, fmt.Errorf("failed to create recipient token: %w", err)
+    }
+
+    // Create token data for the transfer amount
+    transferTokenData := &TokenData{
+        TokenID:   tokenData.TokenID,
+        Amount:    transferAmount,
+        TypeCode:  tokenData.TypeCode,
+        Metadata:  tokenData.Metadata + fmt.Sprintf(" [Transferred from %s]", tokenUTXO.TxID[:8]),
+        Timestamp: uint64(time.Now().Unix()),
+    }
+
+    _, err = recipientToken.CreateTaprootOutput(transferTokenData)
+    if err != nil {
+        return "", nil, fmt.Errorf("failed to create recipient token output: %w", err)
+    }
+
+    recipientTokenAddr, err := recipientToken.GetTaprootAddress()
+    if err != nil {
+        return "", nil, fmt.Errorf("failed to get recipient token address: %w", err)
+    }
+
+    fmt.Printf("✅ Created new token address for recipient: %s\n", recipientTokenAddr)
+
+    // Send some Bitcoin to this new token address to fund it
+    const tokenFunding = 0.00001 // 1000 sats
+    fmt.Printf("🔄 Funding the new token address with %.8f BTC...\n", tokenFunding)
+    
+    fundTxid, err := RunBitcoinCommand(fmt.Sprintf("sendtoaddress %s %.8f", recipientTokenAddr, tokenFunding))
+    if err != nil {
+        return "", nil, fmt.Errorf("failed to fund token address: %w", err)
+    }
+
+    // Mine a block to confirm the funding
+    newAddress, err := RunBitcoinCommand("getnewaddress")
+    if err != nil {
+        return "", nil, err
+    }
+    _, err = RunBitcoinCommand(fmt.Sprintf("generatetoaddress 1 %s", newAddress))
+    if err != nil {
+        return "", nil, err
+    }
+
+    fmt.Printf("✅ Token funded: %s\n", fundTxid)
+
+    // Spend the new token to the recipient's address
+    fmt.Println("🔄 Revealing token to recipient...")
+    
+    spendTx, err := recipientToken.CreateScriptPathSpendingTx(
+        fundTxid, 0, 1000, recipientAddress, 2000,
+    )
+    if err != nil {
+        return "", nil, fmt.Errorf("failed to create spend tx: %w", err)
+    }
+
+    var spendBuf bytes.Buffer
+    spendTx.Serialize(&spendBuf)
+    spendHex := hex.EncodeToString(spendBuf.Bytes())
+
+    finalTxid, err := RunBitcoinCommand(fmt.Sprintf("sendrawtransaction %s", spendHex))
+    if err != nil {
+        return "", nil, fmt.Errorf("failed to broadcast spend tx: %w", err)
+    }
+
+    // Save the recipient's token key for them
+    err = recipientToken.SavePrivateKey("recipient_token_key.hex")
+    if err != nil {
+        fmt.Printf("⚠️ Warning: Could not save recipient key: %v\n", err)
+    } else {
+        fmt.Println("💾 Saved recipient token key to: recipient_token_key.hex")
+        fmt.Println("   Send this file to the recipient so they can manage their token")
+    }
+
+    recipientFunding := &FundingData{
+        TxID:    finalTxid,
+        Vout:    0,
+        Value:   300, // Approximate after fees
+        Address: recipientAddress,
+    }
+
+    fmt.Printf("✅ Alternative token transfer completed!\n")
+    fmt.Printf("   New token transaction: %s\n", finalTxid)
+    fmt.Printf("   Recipient can extract token data from this transaction\n")
+    fmt.Printf("   Token data embedded: %d %s tokens\n", transferAmount, tokenData.TokenID)
+
+    return finalTxid, recipientFunding, nil
+}
+
 func SpendToken(destination string) (string, error) {
 	fmt.Println("\n🔍 DEBUG: Starting SpendToken")
 
@@ -722,78 +963,87 @@ func RevealHybridToken(destination string) (string, error) {
 
 // Add to TransferToken function in taproot_token_cli.go
 func TransferToken(tokenKeyHex string, tokenUTXO *FundingData, tokenData *TokenData,
-	transferAmount uint64, recipientPubKey *btcec.PublicKey, feeRate int64) (string, *FundingData, error) {
-	// Load token key data
-	token, err := LoadTaprootToken(tokenKeyHex)
-	if err != nil {
-		return "", nil, fmt.Errorf("failed to load token key: %w", err)
-	}
+    transferAmount uint64, recipientAddress string, feeRate int64) (string, *FundingData, error) {
+    // Load token key data
+    token, err := LoadTaprootToken(tokenKeyHex)
+    if err != nil {
+        return "", nil, fmt.Errorf("failed to load token key: %w", err)
+    }
 
-	// Validate canonical token ID
-	if !ValidateCanonicalTokenID(tokenData.TokenID, tokenUTXO.TxID) {
-		return "", nil, fmt.Errorf("canonical token ID mismatch: tokenID does not match txid prefix")
-	}
+    // Validate canonical token ID
+    if !ValidateCanonicalTokenID(tokenData.TokenID, tokenUTXO.TxID) {
+        return "", nil, fmt.Errorf("canonical token ID mismatch: tokenID does not match txid prefix")
+    }
 
-	// Create the recipient token using the same derivation method
-	// Extract the base token ID (without the TXID suffix)
-	baseTokenID := tokenData.TokenID
-	if strings.Contains(baseTokenID, ":") {
-		parts := strings.Split(baseTokenID, ":")
-		baseTokenID = parts[0]
-	}
+    // Create the token split transaction
+    tx, err := token.SplitToken(
+        tokenUTXO.TxID,
+        tokenUTXO.Vout,
+        tokenUTXO.Value,
+        tokenData,
+        transferAmount,
+        recipientAddress,
+        feeRate,
+    )
 
-	// Generate a unique child token ID for the recipient
-	// (could be based on recipient address or other identifier)
-	recipientTokenID := fmt.Sprintf("%s-%s", baseTokenID,
-		hex.EncodeToString(recipientPubKey.SerializeCompressed()[:4]))
+    // If we don't have enough funds, try with multiple inputs
+    if err != nil && strings.Contains(err.Error(), "insufficient funds") {
+        // Extract how much we need vs how much we have
+        parts := strings.Split(err.Error(), "need ")
+        if len(parts) > 1 {
+            needHaveParts := strings.Split(parts[1], ", have ")
+            if len(needHaveParts) > 1 {
+                needed, nerr := strconv.ParseInt(needHaveParts[0], 10, 64)
+                have, herr := strconv.ParseInt(needHaveParts[1], 10, 64)
+                if nerr == nil && herr == nil {
+                    additionalNeeded := needed - have
+                    fmt.Printf("⚠️ Insufficient funds in token UTXO. Need %d more satoshis\n", additionalNeeded)
+                    fmt.Println("🔄 Attempting to use additional inputs from wallet...")
 
-	// Log the derivation details
-	fmt.Printf("🔍 Transfer token derivation: base=%s, recipient=%s\n",
-		baseTokenID, recipientTokenID)
+                    // Try again with multiple inputs
+                    tx, err = token.CreateMultiInputTokenTransaction(
+                        tokenUTXO,
+                        additionalNeeded+1000, // Add a buffer
+                        tokenData,
+                        transferAmount,
+                        recipientAddress,
+                        feeRate,
+                    )
+                }
+            }
+        }
+    }
 
-	// Create the token split transaction
-	tx, err := token.SplitToken(
-		tokenUTXO.TxID,
-		tokenUTXO.Vout,
-		tokenUTXO.Value,
-		tokenData,
-		transferAmount,
-		recipientPubKey,
-		feeRate,
-	)
-	if err != nil {
-		return "", nil, fmt.Errorf("failed to create transfer transaction: %w", err)
-	}
+    if err != nil {
+        return "", nil, err
+    }
 
-	// Serialize and broadcast transaction
-	var buf bytes.Buffer
-	tx.Serialize(&buf)
-	txHex := hex.EncodeToString(buf.Bytes())
+    // Serialize and broadcast transaction
+    var buf bytes.Buffer
+    tx.Serialize(&buf)
+    txHex := hex.EncodeToString(buf.Bytes())
 
-	err = os.WriteFile("transfer_tx.hex", []byte(txHex), 0644)
-	if err != nil {
-		return "", nil, fmt.Errorf("failed to save transaction hex: %w", err)
-	}
+    err = os.WriteFile("transfer_tx.hex", []byte(txHex), 0644)
+    if err != nil {
+        return "", nil, fmt.Errorf("failed to save transaction hex: %w", err)
+    }
 
-	txid, err := RunBitcoinCommand(fmt.Sprintf("sendrawtransaction %s", txHex))
-	if err != nil {
-		return "", nil, fmt.Errorf("failed to broadcast transaction: %w", err)
-	}
+    txid, err := RunBitcoinCommand(fmt.Sprintf("sendrawtransaction %s", txHex))
+    if err != nil {
+        return "", nil, fmt.Errorf("failed to broadcast transaction: %w", err)
+    }
 
-	// Record the recipient funding info
-	xOnly := recipientPubKey.X().Bytes()
-	address := hex.EncodeToString(xOnly)
+    // Record the recipient funding info
+    recipientFunding := &FundingData{
+        TxID:    txid,
+        Vout:    0,
+        Value:   546,
+        Address: recipientAddress,
+    }
 
-	recipientFunding := &FundingData{
-		TxID:           txid,
-		Vout:           0,
-		Value:          tx.TxOut[0].Value,
-		Address:        address,
-		DerivationPath: GetTokenDerivationPath(recipientTokenID, Network == &chaincfg.TestNet3Params),
-	}
-
-	return txid, recipientFunding, nil
+    return txid, recipientFunding, nil
 }
+
 
 // Add to taproot_token_cli.go
 func RecoverTokensFromDerivationPaths() ([]*TokenWithFunding, error) {
@@ -1038,98 +1288,213 @@ type TokenWithFunding struct {
 }
 
 // BypassTransferToken skips canonical ID validation for detected tokens
+// BypassTransferToken skips canonical ID validation for detected tokens
 func BypassTransferToken(tokenKeyHex string, tokenUTXO *FundingData, tokenData *TokenData,
-	transferAmount uint64, recipientPubKey *btcec.PublicKey, feeRate int64) (string, *FundingData, error) {
-	token, err := LoadTaprootToken(tokenKeyHex)
-	if err != nil {
-		return "", nil, fmt.Errorf("failed to load token key: %w", err)
-	}
+    transferAmount uint64, recipientAddress string, feeRate int64) (string, *FundingData, error) {
+    
+    fmt.Println("🔧 Finding the actual wallet key for detected token...")
+    
+    // Extract original name without any txid suffix
+    originalName := tokenData.TokenID
+    if strings.Contains(originalName, ":") {
+        parts := strings.Split(originalName, ":")
+        originalName = parts[0]
+    }
+    
+    // Remove null padding
+    originalName = strings.TrimRight(originalName, "\x00")
+    
+    fmt.Printf("🔍 Looking for wallet key for token ID: %s\n", originalName)
+    
+    // Search wallet addresses for the token label
+    addressesJSON, err := RunBitcoinCommand("listaddressgroupings")
+    if err != nil {
+        return "", nil, fmt.Errorf("failed to list addresses: %w", err)
+    }
 
-	// Skip canonical ID validation - just pad out the token ID to match UTXO
-	paddedTokenID := tokenData.TokenID
-	if !strings.Contains(paddedTokenID, ":") {
-		paddedTokenID = fmt.Sprintf("%s:%s", tokenData.TokenID, tokenUTXO.TxID[:8])
-	}
+    var addresses [][]interface{}
+    if err := json.Unmarshal([]byte(addressesJSON), &addresses); err != nil {
+        return "", nil, fmt.Errorf("failed to parse addresses: %w", err)
+    }
 
-	// Create a copy of token data with the padded ID
-	paddedTokenData := &TokenData{
-		TokenID:   paddedTokenID,
-		Amount:    tokenData.Amount,
-		TypeCode:  tokenData.TypeCode,
-		Metadata:  tokenData.Metadata,
-		Timestamp: tokenData.Timestamp,
-	}
+    var tokenAddress string
+    found := false
 
-	// Try to create the normal transaction first
-	tx, err := token.SplitToken(
-		tokenUTXO.TxID,
-		tokenUTXO.Vout,
-		tokenUTXO.Value,
-		paddedTokenData,
-		transferAmount,
-		recipientPubKey,
-		feeRate,
-	)
+    // Check each address for token labels
+    for _, group := range addresses {
+        for _, addrData := range group {
+            addr, ok := addrData.([]interface{})
+            if !ok || len(addr) < 1 {
+                continue
+            }
 
-	// If we don't have enough funds, try with multiple inputs
-	if err != nil && strings.Contains(err.Error(), "insufficient funds") {
-		// Extract how much we need vs how much we have
-		parts := strings.Split(err.Error(), "need ")
-		if len(parts) > 1 {
-			needHaveParts := strings.Split(parts[1], ", have ")
-			if len(needHaveParts) > 1 {
-				needed, nerr := strconv.ParseInt(needHaveParts[0], 10, 64)
-				have, herr := strconv.ParseInt(needHaveParts[1], 10, 64)
-				if nerr == nil && herr == nil {
-					additionalNeeded := needed - have
-					fmt.Printf("⚠️ Insufficient funds in token UTXO. Need %d more satoshis\n", additionalNeeded)
-					fmt.Println("🔄 Attempting to use additional inputs from wallet...")
+            addrStr, ok := addr[0].(string)
+            if !ok {
+                continue
+            }
 
-					// Try again with multiple inputs
-					tx, err = token.CreateMultiInputTokenTransaction(
-						tokenUTXO,
-						additionalNeeded+1000, // Add a buffer
-						paddedTokenData,
-						transferAmount,
-						recipientPubKey,
-						feeRate,
-					)
-				}
-			}
-		}
-	}
+            // Get address info to check labels
+            addrInfoJSON, err := RunBitcoinCommand(fmt.Sprintf("getaddressinfo %s", addrStr))
+            if err != nil {
+                continue
+            }
 
-	if err != nil {
-		return "", nil, err
-	}
+            var addrInfo map[string]interface{}
+            if err := json.Unmarshal([]byte(addrInfoJSON), &addrInfo); err != nil {
+                continue
+            }
 
-	var buf bytes.Buffer
-	tx.Serialize(&buf)
-	txHex := hex.EncodeToString(buf.Bytes())
+            // Check labels for our token
+            if rawLabels, ok := addrInfo["labels"].([]interface{}); ok {
+                for _, lbl := range rawLabels {
+                    var labelStr string
+                    if m, ok := lbl.(map[string]interface{}); ok {
+                        if name, ok := m["name"].(string); ok {
+                            labelStr = name
+                        }
+                    } else if s, ok := lbl.(string); ok {
+                        labelStr = s
+                    }
 
-	err = os.WriteFile("transfer_tx.hex", []byte(txHex), 0644)
-	if err != nil {
-		return "", nil, fmt.Errorf("failed to save transaction hex: %w", err)
-	}
+                    // Check for both label formats
+                    // Old format: "Token:SPX:" 
+                    // New format: "TokenPath:m/86'/1'/0'/0/123456:SPX"
+                    tokenMatches := strings.Contains(labelStr, "Token:"+originalName+":") || 
+                                   (strings.Contains(labelStr, ":"+originalName) && strings.Contains(labelStr, "TokenPath:"))
+                    
+                    if tokenMatches {
+                        tokenAddress = addrStr
+                        found = true
+                        fmt.Printf("✅ Found wallet address for token: %s (label: %s)\n", tokenAddress, labelStr)
+                        break
+                    }
+                }
+                if found {
+                    break
+                }
+            }
+        }
+        if found {
+            break
+        }
+    }
 
-	txid, err := RunBitcoinCommand(fmt.Sprintf("sendrawtransaction %s", txHex))
-	if err != nil {
-		return "", nil, fmt.Errorf("failed to broadcast transaction: %w", err)
-	}
+    var token *TaprootToken
+    
+    if found {
+        // Get the private key for this address from the wallet
+        fmt.Printf("🔐 Getting private key for address: %s\n", tokenAddress)
+        privKeyWIF, err := RunBitcoinCommand(fmt.Sprintf("dumpprivkey %s", tokenAddress))
+        if err != nil {
+            return "", nil, fmt.Errorf("failed to get private key for token address: %w", err)
+        }
 
-	// Return x-only pubkey manually
-	xOnly := recipientPubKey.X().Bytes()
-	address := hex.EncodeToString(xOnly)
+        // Convert WIF to private key
+        wif, err := btcutil.DecodeWIF(privKeyWIF)
+        if err != nil {
+            return "", nil, fmt.Errorf("failed to decode WIF: %w", err)
+        }
 
-	recipientFunding := &FundingData{
-		TxID:    txid,
-		Vout:    0,
-		Value:   tx.TxOut[0].Value,
-		Address: address,
-	}
+        privKey, _ := btcec.PrivKeyFromBytes(wif.PrivKey.Serialize())
+        
+        // Create token with the actual wallet key
+        token = &TaprootToken{
+            PrivateKey: privKey,
+            PublicKey:  privKey.PubKey(),
+        }
+        
+        fmt.Println("✅ Using actual wallet private key for token")
+    } else {
+        // Fallback to provided token key (might not work for detected tokens)
+        fmt.Println("⚠️ Could not find wallet key, trying provided key (may fail)")
+        token, err = LoadTaprootToken(tokenKeyHex)
+        if err != nil {
+            return "", nil, fmt.Errorf("failed to load token key: %w", err)
+        }
+    }
 
-	return txid, recipientFunding, nil
+    // Skip canonical ID validation - just pad out the token ID to match UTXO
+    paddedTokenID := tokenData.TokenID
+    if !strings.Contains(paddedTokenID, ":") {
+        paddedTokenID = fmt.Sprintf("%s:%s", tokenData.TokenID, tokenUTXO.TxID[:8])
+    }
+
+    // Create a copy of token data with the padded ID
+    paddedTokenData := &TokenData{
+        TokenID:   paddedTokenID,
+        Amount:    tokenData.Amount,
+        TypeCode:  tokenData.TypeCode,
+        Metadata:  tokenData.Metadata,
+        Timestamp: tokenData.Timestamp,
+    }
+
+    // Try to create the normal transaction first
+    tx, err := token.SplitToken(
+        tokenUTXO.TxID,
+        tokenUTXO.Vout,
+        tokenUTXO.Value,
+        paddedTokenData,
+        transferAmount,
+        recipientAddress,
+        feeRate,
+    )
+
+    // If we don't have enough funds, try with multiple inputs
+    if err != nil && strings.Contains(err.Error(), "insufficient funds") {
+        // Extract how much we need vs how much we have
+        parts := strings.Split(err.Error(), "need ")
+        if len(parts) > 1 {
+            needHaveParts := strings.Split(parts[1], ", have ")
+            if len(needHaveParts) > 1 {
+                needed, nerr := strconv.ParseInt(needHaveParts[0], 10, 64)
+                have, herr := strconv.ParseInt(needHaveParts[1], 10, 64)
+                if nerr == nil && herr == nil {
+                    additionalNeeded := needed - have
+                    fmt.Printf("⚠️ Insufficient funds in token UTXO. Need %d more satoshis\n", additionalNeeded)
+                    fmt.Println("🔄 Attempting to use additional inputs from wallet...")
+
+                    // Try again with multiple inputs
+                    tx, err = token.CreateMultiInputTokenTransaction(
+                        tokenUTXO,
+                        additionalNeeded+1000, // Add a buffer
+                        paddedTokenData,
+                        transferAmount,
+                        recipientAddress,
+                        feeRate,
+                    )
+                }
+            }
+        }
+    }
+
+    if err != nil {
+        return "", nil, err
+    }
+
+    var buf bytes.Buffer
+    tx.Serialize(&buf)
+    txHex := hex.EncodeToString(buf.Bytes())
+
+    err = os.WriteFile("transfer_tx.hex", []byte(txHex), 0644)
+    if err != nil {
+        return "", nil, fmt.Errorf("failed to save transaction hex: %w", err)
+    }
+
+    txid, err := RunBitcoinCommand(fmt.Sprintf("sendrawtransaction %s", txHex))
+    if err != nil {
+        return "", nil, fmt.Errorf("failed to broadcast transaction: %w", err)
+    }
+
+    recipientFunding := &FundingData{
+        TxID:    txid,
+        Vout:    0,
+        Value:   546,
+        Address: recipientAddress,
+    }
+
+    return txid, recipientFunding, nil
 }
+
 
 func handleCreateCommand() {
 	var tokenName = "demo-token"
@@ -1350,285 +1715,278 @@ func handleCreateCommand() {
 	}
 }
 
+// Complete handleTransferCommand function
 func handleTransferCommand() {
-	var recipientAddress string
-	var transferAmount uint64
-	var tokenFile string
-	var fundingFile string
-	var feeRate int64 = 2000
-	var recipientPubHex string
-	var listTokens bool
+    var recipientAddress string
+    var transferAmount uint64
+    var tokenFile string
+    var fundingFile string
+    var feeRate int64 = 2000
+    var listTokens bool
 
-	for i := 0; i < len(os.Args); i++ {
-		arg := os.Args[i]
-		switch arg {
-		case "--to":
-			if i+1 < len(os.Args) {
-				recipientAddress = os.Args[i+1]
-				i++
-			}
-		case "--amount":
-			if i+1 < len(os.Args) {
-				amt, err := strconv.ParseUint(os.Args[i+1], 10, 64)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "❌ Invalid amount: %v\n", err)
-					os.Exit(1)
-				}
-				transferAmount = amt
-				i++
-			}
-		case "--token":
-			if i+1 < len(os.Args) {
-				tokenFile = os.Args[i+1]
-				i++
-			}
-		case "--funding":
-			if i+1 < len(os.Args) {
-				fundingFile = os.Args[i+1]
-				i++
-			}
-		case "--fee":
-			if i+1 < len(os.Args) {
-				fee, err := strconv.ParseInt(os.Args[i+1], 10, 64)
-				if err != nil {
-					fmt.Fprintf(os.Stderr, "❌ Invalid fee rate: %v\n", err)
-					os.Exit(1)
-				}
-				feeRate = fee
-				i++
-			}
-		case "--recipientpub":
-			if i+1 < len(os.Args) {
-				recipientPubHex = os.Args[i+1]
-				i++
-			}
-		case "--list":
-			listTokens = true
-		}
-	}
+    for i := 0; i < len(os.Args); i++ {
+        arg := os.Args[i]
+        switch arg {
+        case "--to":
+            if i+1 < len(os.Args) {
+                recipientAddress = os.Args[i+1]
+                i++
+            }
+        case "--amount":
+            if i+1 < len(os.Args) {
+                amt, err := strconv.ParseUint(os.Args[i+1], 10, 64)
+                if err != nil {
+                    fmt.Fprintf(os.Stderr, "❌ Invalid amount: %v\n", err)
+                    os.Exit(1)
+                }
+                transferAmount = amt
+                i++
+            }
+        case "--token":
+            if i+1 < len(os.Args) {
+                tokenFile = os.Args[i+1]
+                i++
+            }
+        case "--funding":
+            if i+1 < len(os.Args) {
+                fundingFile = os.Args[i+1]
+                i++
+            }
+        case "--fee":
+            if i+1 < len(os.Args) {
+                fee, err := strconv.ParseInt(os.Args[i+1], 10, 64)
+                if err != nil {
+                    fmt.Fprintf(os.Stderr, "❌ Invalid fee rate: %v\n", err)
+                    os.Exit(1)
+                }
+                feeRate = fee
+                i++
+            }
+        case "--list":
+            listTokens = true
+        }
+    }
 
-	// If --list flag is provided, just list tokens and exit
-	if listTokens {
-		tokens, err := ScanWalletForTokens()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "❌ Failed to list tokens: %v\n", err)
-			os.Exit(1)
-		}
+    // If --list flag is provided, just list tokens and exit
+    if listTokens {
+        tokens, err := ScanWalletForTokens()
+        if err != nil {
+            fmt.Fprintf(os.Stderr, "❌ Failed to list tokens: %v\n", err)
+            os.Exit(1)
+        }
 
-		fmt.Println("🔍 Tokens in your wallet:")
-		if len(tokens) == 0 {
-			fmt.Println("  No tokens found")
-			os.Exit(0)
-		}
+        fmt.Println("🔍 Tokens in your wallet:")
+        if len(tokens) == 0 {
+            fmt.Println("  No tokens found")
+            os.Exit(0)
+        }
 
-		for i, t := range tokens {
-			fmt.Printf("%d. Token: %s\n", i+1, t.TokenData.TokenID)
-			fmt.Printf("   Amount: %d\n", t.TokenData.Amount)
-			fmt.Printf("   Metadata: %s\n", t.TokenData.Metadata)
-			fmt.Printf("   UTXO: %s:%d (%d sats)\n", t.Funding.TxID[:8]+"...", t.Funding.Vout, t.Funding.Value)
-			fmt.Println()
-		}
-		os.Exit(0)
-	}
+        for i, t := range tokens {
+            fmt.Printf("%d. Token: %s\n", i+1, t.TokenData.TokenID)
+            fmt.Printf("   Amount: %d\n", t.TokenData.Amount)
+            fmt.Printf("   Metadata: %s\n", t.TokenData.Metadata)
+            fmt.Printf("   UTXO: %s:%d (%d sats)\n", t.Funding.TxID[:8]+"...", t.Funding.Vout, t.Funding.Value)
+            fmt.Println()
+        }
+        os.Exit(0)
+    }
 
-	// If no token specified, list tokens and prompt for selection
-	var selectedToken *TokenWithFunding
-	if tokenFile == "" && fundingFile == "" {
-		tokens, err := ScanWalletForTokens()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "❌ Failed to list tokens: %v\n", err)
-			os.Exit(1)
-		}
+    // If no token specified, list tokens and prompt for selection
+    var selectedToken *TokenWithFunding
+    if tokenFile == "" && fundingFile == "" {
+        tokens, err := ScanWalletForTokens()
+        if err != nil {
+            fmt.Fprintf(os.Stderr, "❌ Failed to list tokens: %v\n", err)
+            os.Exit(1)
+        }
 
-		if len(tokens) == 0 {
-			fmt.Println("❌ No tokens found in your wallet")
-			os.Exit(1)
-		}
+        if len(tokens) == 0 {
+            fmt.Println("❌ No tokens found in your wallet")
+            os.Exit(1)
+        }
 
-		fmt.Println("🔍 Select a token to transfer:")
-		for i, t := range tokens {
-			fmt.Printf("%d. Token: %s\n", i+1, t.TokenData.TokenID)
-			fmt.Printf("   Amount: %d\n", t.TokenData.Amount)
-			fmt.Printf("   Metadata: %s\n", t.TokenData.Metadata)
-			fmt.Printf("   UTXO: %s:%d\n", t.Funding.TxID[:8]+"...", t.Funding.Vout)
-			fmt.Println()
-		}
+        fmt.Println("🔍 Select a token to transfer:")
+        for i, t := range tokens {
+            fmt.Printf("%d. Token: %s\n", i+1, t.TokenData.TokenID)
+            fmt.Printf("   Amount: %d\n", t.TokenData.Amount)
+            fmt.Printf("   Metadata: %s\n", t.TokenData.Metadata)
+            fmt.Printf("   UTXO: %s:%d\n", t.Funding.TxID[:8]+"...", t.Funding.Vout)
+            fmt.Println()
+        }
 
-		var choice int
-		fmt.Print("Enter token number: ")
-		fmt.Scanf("%d", &choice)
+        var choice int
+        fmt.Print("Enter token number: ")
+        fmt.Scanf("%d", &choice)
 
-		if choice < 1 || choice > len(tokens) {
-			fmt.Fprintf(os.Stderr, "❌ Invalid selection\n")
-			os.Exit(1)
-		}
+        if choice < 1 || choice > len(tokens) {
+            fmt.Fprintf(os.Stderr, "❌ Invalid selection\n")
+            os.Exit(1)
+        }
 
-		selectedToken = tokens[choice-1]
+        selectedToken = tokens[choice-1]
 
-		// Create temporary files for detected tokens
-		if selectedToken.Filename == "detected" {
-			fmt.Println("⚙️ Creating temporary files for detected token...")
+        // Create temporary files for detected tokens
+        if selectedToken.Filename == "detected" {
+            fmt.Println("⚙️ Creating temporary files for detected token...")
 
-			// Save token data to temporary file
-			tempOutput := &OutputData{
-				Address:   selectedToken.Funding.Address,
-				TokenData: *selectedToken.TokenData,
-			}
-			tempFile := "temp_token_output.json"
-			err = SaveOutputData(tempFile, tempOutput)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "❌ Failed to save temporary token data: %v\n", err)
-				os.Exit(1)
-			}
-			tokenFile = tempFile
+            // Save token data to temporary file
+            tempOutput := &OutputData{
+                Address:   selectedToken.Funding.Address,
+                TokenData: *selectedToken.TokenData,
+            }
+            tempFile := "temp_token_output.json"
+            err = SaveOutputData(tempFile, tempOutput)
+            if err != nil {
+                fmt.Fprintf(os.Stderr, "❌ Failed to save temporary token data: %v\n", err)
+                os.Exit(1)
+            }
+            tokenFile = tempFile
 
-			// Save funding data to temporary file
-			tempFunding := &FundingData{
-				TxID:    selectedToken.Funding.TxID,
-				Vout:    selectedToken.Funding.Vout,
-				Value:   selectedToken.Funding.Value,
-				Address: selectedToken.Funding.Address,
-			}
-			tempFundingFile := "temp_token_funding.json"
-			err = SaveFundingData(tempFundingFile, tempFunding)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "❌ Failed to save temporary funding data: %v\n", err)
-				os.Exit(1)
-			}
-			fundingFile = tempFundingFile
+            // Save funding data to temporary file
+            tempFunding := &FundingData{
+                TxID:    selectedToken.Funding.TxID,
+                Vout:    selectedToken.Funding.Vout,
+                Value:   selectedToken.Funding.Value,
+                Address: selectedToken.Funding.Address,
+            }
+            tempFundingFile := "temp_token_funding.json"
+            err = SaveFundingData(tempFundingFile, tempFunding)
+            if err != nil {
+                fmt.Fprintf(os.Stderr, "❌ Failed to save temporary funding data: %v\n", err)
+                os.Exit(1)
+            }
+            fundingFile = tempFundingFile
 
-			fmt.Printf("✅ Temporary files created:\n  Token: %s\n  Funding: %s\n",
-				tempFile, tempFundingFile)
-		} else {
-			tokenFile = selectedToken.Filename
-			// Try to use matching funding file if available
-			specificFundingFile := strings.Replace(tokenFile, "_output.json", "_funding.json", 1)
-			if _, err := os.Stat(specificFundingFile); err == nil {
-				fundingFile = specificFundingFile
-			} else {
-				fundingFile = "funding_data.json"
-			}
-		}
+            fmt.Printf("✅ Temporary files created:\n  Token: %s\n  Funding: %s\n",
+                tempFile, tempFundingFile)
+        } else {
+            tokenFile = selectedToken.Filename
+            // Try to use matching funding file if available
+            specificFundingFile := strings.Replace(tokenFile, "_output.json", "_funding.json", 1)
+            if _, err := os.Stat(specificFundingFile); err == nil {
+                fundingFile = specificFundingFile
+            } else {
+                fundingFile = "funding_data.json"
+            }
+        }
 
-		// If transfer amount not specified, prompt for it
-		if transferAmount == 0 {
-			fmt.Printf("Token balance: %d\n", selectedToken.TokenData.Amount)
-			fmt.Print("Enter amount to transfer: ")
-			fmt.Scanf("%d", &transferAmount)
+        // If transfer amount not specified, prompt for it
+        if transferAmount == 0 {
+            fmt.Printf("Token balance: %d\n", selectedToken.TokenData.Amount)
+            fmt.Print("Enter amount to transfer: ")
+            fmt.Scanf("%d", &transferAmount)
 
-			if transferAmount == 0 || transferAmount > selectedToken.TokenData.Amount {
-				fmt.Fprintf(os.Stderr, "❌ Invalid transfer amount\n")
-				os.Exit(1)
-			}
-		}
-	}
+            if transferAmount == 0 || transferAmount > selectedToken.TokenData.Amount {
+                fmt.Fprintf(os.Stderr, "❌ Invalid transfer amount\n")
+                os.Exit(1)
+            }
+        }
+    }
 
-	if recipientAddress == "" {
-		fmt.Fprintln(os.Stderr, "❌ Missing required --to address")
-		os.Exit(1)
-	}
+    if recipientAddress == "" {
+        fmt.Fprintln(os.Stderr, "❌ Missing required --to address")
+        os.Exit(1)
+    }
 
-	if transferAmount == 0 {
-		fmt.Fprintln(os.Stderr, "❌ Missing or invalid --amount")
-		os.Exit(1)
-	}
+    if transferAmount == 0 {
+        fmt.Fprintln(os.Stderr, "❌ Missing or invalid --amount")
+        os.Exit(1)
+    }
 
-	// Use default files if not specified
-	if tokenFile == "" {
-		tokenFile = "taproot_output.json"
-	}
-	if fundingFile == "" {
-		fundingFile = "funding_data.json"
-	}
+    // Use default files if not specified
+    if tokenFile == "" {
+        tokenFile = "taproot_output.json"
+    }
+    if fundingFile == "" {
+        fundingFile = "funding_data.json"
+    }
 
-	fmt.Println("📦 Loading token and funding files")
-	outputData, err := LoadOutputData(tokenFile)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Failed to load token data from %s: %v\n", tokenFile, err)
-		os.Exit(1)
-	}
-	fundingData, err := LoadFundingData(fundingFile)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Failed to load funding data from %s: %v\n", fundingFile, err)
-		os.Exit(1)
-	}
+    fmt.Println("📦 Loading token and funding files")
+    outputData, err := LoadOutputData(tokenFile)
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "❌ Failed to load token data from %s: %v\n", tokenFile, err)
+        os.Exit(1)
+    }
+    fundingData, err := LoadFundingData(fundingFile)
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "❌ Failed to load funding data from %s: %v\n", fundingFile, err)
+        os.Exit(1)
+    }
 
-	// DEBUG: Print funding data to verify the correct UTXO is being used
-	fmt.Printf("🔍 DEBUG: Using funding data: TXID=%s, Vout=%d, Value=%d\n",
-		fundingData.TxID, fundingData.Vout, fundingData.Value)
+    // DEBUG: Print funding data to verify the correct UTXO is being used
+    fmt.Printf("🔍 DEBUG: Using funding data: TXID=%s, Vout=%d, Value=%d\n",
+        fundingData.TxID, fundingData.Vout, fundingData.Value)
 
-	keyHex, err := os.ReadFile("token_key.hex")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Failed to read token key: %v\n", err)
-		os.Exit(1)
-	}
+    if transferAmount > outputData.TokenData.Amount {
+        fmt.Fprintf(os.Stderr, "❌ You do not own enough of the token. Balance: %d, Requested: %d\n", 
+            outputData.TokenData.Amount, transferAmount)
+        os.Exit(1)
+    }
 
-	if transferAmount > outputData.TokenData.Amount {
-		fmt.Fprintf(os.Stderr, "❌ You do not own enough of the token. Balance: %d, Requested: %d\n", outputData.TokenData.Amount, transferAmount)
-		os.Exit(1)
-	}
+    // Create transfer transaction
+    fmt.Println("🔄 Creating transfer transaction...")
+    var txid string
+    var recipientFunding *FundingData
 
-	var recipientPubKey *btcec.PublicKey
-	if recipientPubHex != "" {
-		pubBytes, err := hex.DecodeString(recipientPubHex)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "❌ Invalid recipient pubkey: %v\n", err)
-			os.Exit(1)
-		}
-		recipientPubKey, err = btcec.ParsePubKey(pubBytes)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "❌ Failed to parse pubkey: %v\n", err)
-			os.Exit(1)
-		}
-	} else {
-		tmpKey, _ := btcec.NewPrivateKey()
-		recipientPubKey = tmpKey.PubKey()
-		fmt.Println("⚠️ No recipient pubkey provided, generated temporary one")
-	}
+    // Check if this is a detected token
+    isDetectedToken := tokenFile == "temp_token_output.json"
+    if isDetectedToken {
+        fmt.Println("⚠️ Using descriptor wallet compatible transfer for detected token")
+        
+        txid, recipientFunding, err = DirectUTXOTransferToken(
+            fundingData,
+            &outputData.TokenData,
+            transferAmount,
+            recipientAddress,
+            feeRate,
+        )
+        
+        if err != nil {
+            fmt.Fprintf(os.Stderr, "❌ Transfer failed: %v\n", err)
+            os.Exit(1)
+        }
+        
+    } else {
+        // Use normal transfer for file-based tokens
+        keyHex, err := os.ReadFile("token_key.hex")
+        if err != nil {
+            fmt.Fprintf(os.Stderr, "❌ Failed to read token key: %v\n", err)
+            os.Exit(1)
+        }
 
-	fmt.Println("🔄 Creating transfer transaction...")
-	var txid string
-	var recipientFunding *FundingData
+        txid, recipientFunding, err = TransferToken(
+            strings.TrimSpace(string(keyHex)),
+            fundingData,
+            &outputData.TokenData,
+            transferAmount,
+            recipientAddress,
+            feeRate,
+        )
+        
+        if err != nil {
+            fmt.Fprintf(os.Stderr, "❌ Transfer failed: %v\n", err)
+            os.Exit(1)
+        }
+    }
 
-	// Check if this is a detected token
-	isDetectedToken := tokenFile == "temp_token_output.json"
-	if isDetectedToken {
-		fmt.Println("⚠️ Using bypass transfer for token detected from blockchain")
-		txid, recipientFunding, err = BypassTransferToken(
-			strings.TrimSpace(string(keyHex)),
-			fundingData,
-			&outputData.TokenData,
-			transferAmount,
-			recipientPubKey,
-			feeRate,
-		)
-	} else {
-		txid, recipientFunding, err = TransferToken(
-			strings.TrimSpace(string(keyHex)),
-			fundingData,
-			&outputData.TokenData,
-			transferAmount,
-			recipientPubKey,
-			feeRate,
-		)
-	}
+    // Update token balance in file
+    outputData.TokenData.Amount -= transferAmount
+    _ = SaveOutputData(tokenFile, outputData)
+    _ = SaveFundingData("recipient_funding.json", recipientFunding)
 
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "❌ Transfer failed: %v\n", err)
-		os.Exit(1)
-	}
-
-	// Update token balance in file
-	outputData.TokenData.Amount -= transferAmount
-	_ = SaveOutputData(tokenFile, outputData)
-	_ = SaveFundingData("recipient_funding.json", recipientFunding)
-
-	fmt.Println("\n✅ Token transfer successful!")
-	fmt.Println("  Token       :", outputData.TokenData.TokenID)
-	fmt.Printf("  To (x-only) : %s\n", recipientFunding.Address)
-	fmt.Println("  Amount      :", transferAmount)
-	fmt.Println("  Transaction :", txid)
-	fmt.Println("  Remaining   :", outputData.TokenData.Amount)
+    fmt.Println("\n✅ Token transfer successful!")
+    fmt.Println("  Token       :", outputData.TokenData.TokenID)
+    fmt.Printf("  To Address  : %s\n", recipientAddress)
+    fmt.Println("  Amount      :", transferAmount)
+    fmt.Println("  Transaction :", txid)
+    fmt.Println("  Remaining   :", outputData.TokenData.Amount)
+    
+    if isDetectedToken {
+        fmt.Println("\n📧 IMPORTANT:")
+        fmt.Println("  1. Send 'recipient_token_key.hex' to the recipient")
+        fmt.Println("  2. The recipient can extract token data from transaction:", txid)
+        fmt.Println("  3. The token data is embedded in the transaction witness")
+    }
 }
 
 // ScanWalletForTokens scans for both direct UTXOs and BIP32-derived tokens
@@ -1896,262 +2254,266 @@ func scanBIP32Tokens() ([]*TokenWithFunding, error) {
 }
 
 // CreateMultiInputTokenTransaction creates a transaction with multiple inputs to fund a token transfer
+// CreateMultiInputTokenTransaction creates a transaction with multiple inputs to fund a token transfer
 func (t *TaprootToken) CreateMultiInputTokenTransaction(
-	tokenUTXO *FundingData,
-	additionalFunds int64, // How many more satoshis we need
-	tokenData *TokenData,
-	transferAmount uint64,
-	recipientPubKey *btcec.PublicKey,
-	feeRate int64,
+    tokenUTXO *FundingData,
+    additionalFunds int64, // How many more satoshis we need
+    tokenData *TokenData,
+    transferAmount uint64,
+    recipientAddress string,
+    feeRate int64,
 ) (*wire.MsgTx, error) {
-	fmt.Printf("📊 Creating multi-input transaction (need %d more sats)\n", additionalFunds)
+    fmt.Printf("📊 Creating multi-input transaction (need %d more sats)\n", additionalFunds)
 
-	// Keep track of which UTXOs we've already used to avoid duplicates
-	usedUTXOs := make(map[string]bool)
-	tokenUTXOKey := tokenUTXO.TxID + ":" + strconv.Itoa(int(tokenUTXO.Vout))
-	usedUTXOs[tokenUTXOKey] = true
+    // ✅ FIX: For detected tokens, we need to reconstruct the ScriptTree
+    if t.ScriptTree == nil {
+        fmt.Println("🔧 Reconstructing ScriptTree for detected token...")
+        
+        // Create a basic token output to initialize ScriptTree
+        tempTokenData := &TokenData{
+            TokenID:   tokenData.TokenID,
+            Amount:    tokenData.Amount,
+            TypeCode:  tokenData.TypeCode,
+            Metadata:  tokenData.Metadata,
+            Timestamp: tokenData.Timestamp,
+        }
+        
+        _, err := t.CreateTaprootOutput(tempTokenData)
+        if err != nil {
+            return nil, fmt.Errorf("failed to reconstruct ScriptTree: %w", err)
+        }
+        fmt.Println("✅ ScriptTree reconstructed")
+    }
 
-	// Start with the token input
-	prevHash, err := chainhash.NewHashFromStr(tokenUTXO.TxID)
-	if err != nil {
-		return nil, fmt.Errorf("invalid token TXID: %w", err)
-	}
-	outpoint := wire.NewOutPoint(prevHash, tokenUTXO.Vout)
-	txIn := wire.NewTxIn(outpoint, nil, nil)
+    // Keep track of which UTXOs we've already used to avoid duplicates
+    usedUTXOs := make(map[string]bool)
+    tokenUTXOKey := tokenUTXO.TxID + ":" + strconv.Itoa(int(tokenUTXO.Vout))
+    usedUTXOs[tokenUTXOKey] = true
 
-	// Create transaction
-	tx := wire.NewMsgTx(2)
-	tx.AddTxIn(txIn)
-	fmt.Printf("📥 Added token input: %s:%d\n", tokenUTXO.TxID, tokenUTXO.Vout)
+    // Start with the token input
+    prevHash, err := chainhash.NewHashFromStr(tokenUTXO.TxID)
+    if err != nil {
+        return nil, fmt.Errorf("invalid token TXID: %w", err)
+    }
+    outpoint := wire.NewOutPoint(prevHash, tokenUTXO.Vout)
+    txIn := wire.NewTxIn(outpoint, nil, nil)
 
-	// Find additional UTXOs to fund the transaction
-	unspentJSON, err := RunBitcoinCommand("listunspent")
-	if err != nil {
-		return nil, fmt.Errorf("failed to list wallet UTXOs: %w", err)
-	}
+    // Create transaction
+    tx := wire.NewMsgTx(2)
+    tx.AddTxIn(txIn)
+    fmt.Printf("📥 Added token input: %s:%d\n", tokenUTXO.TxID, tokenUTXO.Vout)
 
-	var unspent []map[string]interface{}
-	if err = json.Unmarshal([]byte(unspentJSON), &unspent); err != nil {
-		return nil, fmt.Errorf("failed to parse UTXO list: %w", err)
-	}
+    // Find additional UTXOs to fund the transaction
+    unspentJSON, err := RunBitcoinCommand("listunspent")
+    if err != nil {
+        return nil, fmt.Errorf("failed to list wallet UTXOs: %w", err)
+    }
 
-	fmt.Printf("🔍 Searching %d wallet UTXOs for additional inputs\n", len(unspent))
+    var unspent []map[string]interface{}
+    if err = json.Unmarshal([]byte(unspentJSON), &unspent); err != nil {
+        return nil, fmt.Errorf("failed to parse UTXO list: %w", err)
+    }
 
-	additionalInputs := []wire.TxIn{}
-	fundingAmount := int64(0)
+    fmt.Printf("🔍 Searching %d wallet UTXOs for additional inputs\n", len(unspent))
 
-	// Find UTXOs that are NOT the token UTXO
-	for _, utxo := range unspent {
-		txid, ok := utxo["txid"].(string)
-		if !ok {
-			continue
-		}
-		vout, ok := utxo["vout"].(float64)
-		if !ok {
-			continue
-		}
+    additionalInputs := []wire.TxIn{}
+    fundingAmount := int64(0)
 
-		// Create a key for this UTXO to check in our map
-		utxoKey := txid + ":" + strconv.Itoa(int(vout))
+    // Find UTXOs that are NOT the token UTXO
+    for _, utxo := range unspent {
+        txid, ok := utxo["txid"].(string)
+        if !ok {
+            continue
+        }
+        vout, ok := utxo["vout"].(float64)
+        if !ok {
+            continue
+        }
 
-		// Skip UTXOs we've already used (including the token UTXO)
-		if usedUTXOs[utxoKey] {
-			fmt.Printf("  Skipping already used UTXO: %s\n", utxoKey)
-			continue
-		}
+        // Create a key for this UTXO to check in our map
+        utxoKey := txid + ":" + strconv.Itoa(int(vout))
 
-		// Skip if this is the token UTXO (redundant check but keeping for safety)
-		if txid == tokenUTXO.TxID && uint32(vout) == tokenUTXO.Vout {
-			fmt.Printf("  Skipping token UTXO: %s:%d (already included)\n", txid, int(vout))
-			continue
-		}
+        // Skip UTXOs we've already used (including the token UTXO)
+        if usedUTXOs[utxoKey] {
+            fmt.Printf("  Skipping already used UTXO: %s\n", utxoKey)
+            continue
+        }
 
-		amount, ok := utxo["amount"].(float64)
-		if !ok {
-			continue
-		}
+        // Skip if this is the token UTXO (redundant check but keeping for safety)
+        if txid == tokenUTXO.TxID && uint32(vout) == tokenUTXO.Vout {
+            fmt.Printf("  Skipping token UTXO: %s:%d (already included)\n", txid, int(vout))
+            continue
+        }
 
-		// Convert BTC to satoshis
-		satoshis := int64(amount * 100000000)
-		fmt.Printf("  Found UTXO: %s:%d (%d sats)\n", txid, int(vout), satoshis)
+        amount, ok := utxo["amount"].(float64)
+        if !ok {
+            continue
+        }
 
-		// Mark this UTXO as used
-		usedUTXOs[utxoKey] = true
+        // Convert BTC to satoshis
+        satoshis := int64(amount * 100000000)
+        fmt.Printf("  Found UTXO: %s:%d (%d sats)\n", txid, int(vout), satoshis)
 
-		// Add this UTXO as an input
-		inputHash, _ := chainhash.NewHashFromStr(txid)
-		inputOutpoint := wire.NewOutPoint(inputHash, uint32(vout))
-		input := wire.NewTxIn(inputOutpoint, nil, nil)
-		additionalInputs = append(additionalInputs, *input)
+        // Mark this UTXO as used
+        usedUTXOs[utxoKey] = true
 
-		fundingAmount += satoshis
-		fmt.Printf("  Running total: %d/%d sats\n", fundingAmount, additionalFunds)
+        // Add this UTXO as an input
+        inputHash, _ := chainhash.NewHashFromStr(txid)
+        inputOutpoint := wire.NewOutPoint(inputHash, uint32(vout))
+        input := wire.NewTxIn(inputOutpoint, nil, nil)
+        additionalInputs = append(additionalInputs, *input)
 
-		if fundingAmount >= additionalFunds {
-			fmt.Printf("✅ Found enough additional inputs: %d sats\n", fundingAmount)
-			break
-		}
-	}
+        fundingAmount += satoshis
+        fmt.Printf("  Running total: %d/%d sats\n", fundingAmount, additionalFunds)
 
-	if fundingAmount < additionalFunds {
-		return nil, fmt.Errorf("couldn't find enough additional inputs: need %d, found %d",
-			additionalFunds, fundingAmount)
-	}
+        if fundingAmount >= additionalFunds {
+            fmt.Printf("✅ Found enough additional inputs: %d sats\n", fundingAmount)
+            break
+        }
+    }
 
-	// Add the additional inputs to the transaction
-	for i := range additionalInputs {
-		tx.AddTxIn(&additionalInputs[i])
-		fmt.Printf("📥 Added extra input #%d\n", i+1)
-	}
+    if fundingAmount < additionalFunds {
+        return nil, fmt.Errorf("couldn't find enough additional inputs: need %d, found %d",
+            additionalFunds, fundingAmount)
+    }
 
-	// Create recipient output with token
-	recipientTokenData := &TokenData{
-		TokenID:   tokenData.TokenID,
-		Amount:    transferAmount,
-		TypeCode:  tokenData.TypeCode,
-		Metadata:  tokenData.Metadata,
-		Timestamp: uint64(time.Now().Unix()),
-	}
+    // Add the additional inputs to the transaction
+    for i := range additionalInputs {
+        tx.AddTxIn(&additionalInputs[i])
+        fmt.Printf("📥 Added extra input #%d\n", i+1)
+    }
 
-	recipientScriptTree, err := t.CreateTaprootOutputWithOwnership(recipientTokenData, recipientPubKey)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create recipient script: %w", err)
-	}
+    // Create recipient output - SIMPLE APPROACH
+    recipientAddr, err := btcutil.DecodeAddress(recipientAddress, Network)
+    if err != nil {
+        return nil, fmt.Errorf("invalid recipient address: %w", err)
+    }
 
-	recipientPubKeyBytes := recipientScriptTree.TweakedPubKey.SerializeCompressed()[1:33]
-	recipientAddr, err := btcutil.NewAddressTaproot(recipientPubKeyBytes, Network)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create recipient address: %w", err)
-	}
+    recipientScript, err := txscript.PayToAddrScript(recipientAddr)
+    if err != nil {
+        return nil, fmt.Errorf("failed to create recipient script: %w", err)
+    }
 
-	recipientScript, err := txscript.PayToAddrScript(recipientAddr)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create recipient script: %w", err)
-	}
+    // Use minimum dust amount for the token output
+    const minOutputAmount = 546
+    recipientTxOut := wire.NewTxOut(minOutputAmount, recipientScript)
+    tx.AddTxOut(recipientTxOut)
+    fmt.Printf("📤 Added recipient output: %d sats to %s\n", minOutputAmount, recipientAddress)
 
-	// Use minimum dust amount for the token output
-	const minOutputAmount = 546
-	recipientTxOut := wire.NewTxOut(minOutputAmount, recipientScript)
-	tx.AddTxOut(recipientTxOut)
-	fmt.Printf("📤 Added recipient output: %d sats to %s\n", minOutputAmount, recipientAddr.EncodeAddress())
+    // Add change output for token if needed
+    changeAmount := tokenData.Amount - transferAmount
+    if changeAmount > 0 {
+        // Get a new address from your wallet for the change
+        changeAddress, err := RunBitcoinCommand("getnewaddress \"TSBToken-Change\" \"bech32m\"")
+        if err != nil {
+            return nil, fmt.Errorf("failed to get change address: %w", err)
+        }
 
-	// Add change output for token if needed
-	if changeAmount := tokenData.Amount - transferAmount; changeAmount > 0 {
-		changeTokenData := &TokenData{
-			TokenID:   tokenData.TokenID,
-			Amount:    changeAmount,
-			TypeCode:  tokenData.TypeCode,
-			Metadata:  tokenData.Metadata,
-			Timestamp: uint64(time.Now().Unix()),
-		}
+        changeAddr, err := btcutil.DecodeAddress(changeAddress, Network)
+        if err != nil {
+            return nil, fmt.Errorf("failed to decode change address: %w", err)
+        }
 
-		changeScriptTree, err := t.CreateTaprootOutputWithOwnership(changeTokenData, t.PublicKey)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create change script: %w", err)
-		}
+        changeScript, err := txscript.PayToAddrScript(changeAddr)
+        if err != nil {
+            return nil, fmt.Errorf("failed to create change script: %w", err)
+        }
 
-		changePubKeyBytes := changeScriptTree.TweakedPubKey.SerializeCompressed()[1:33]
-		changeAddr, err := btcutil.NewAddressTaproot(changePubKeyBytes, Network)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create change address: %w", err)
-		}
+        changeTxOut := wire.NewTxOut(minOutputAmount, changeScript)
+        tx.AddTxOut(changeTxOut)
+        fmt.Printf("📤 Added token change output: %d sats with %d tokens to %s\n", 
+            minOutputAmount, changeAmount, changeAddress)
+    } else {
+        fmt.Println("📤 No token change output needed (transferring all tokens)")
+    }
 
-		changeScript, err := txscript.PayToAddrScript(changeAddr)
-		if err != nil {
-			return nil, fmt.Errorf("failed to create change script: %w", err)
-		}
+    // Add change output for Bitcoin
+    totalInput := tokenUTXO.Value + fundingAmount
+    totalOutput := int64(len(tx.TxOut)) * minOutputAmount
 
-		changeTxOut := wire.NewTxOut(minOutputAmount, changeScript)
-		tx.AddTxOut(changeTxOut)
-		fmt.Printf("📤 Added token change output: %d sats with %d tokens\n", minOutputAmount, changeAmount)
-	} else {
-		fmt.Println("📤 No token change output needed (transferring all tokens)")
-	}
+    // Estimate fee
+    txSize := 100 + (len(tx.TxIn) * 150) + (len(tx.TxOut) * 50)
+    fee := (feeRate * int64(txSize)) / 1000
+    if fee < 300 {
+        fee = 300
+    }
 
-	// Add change output for Bitcoin
-	totalInput := tokenUTXO.Value + fundingAmount
-	totalOutput := int64(len(tx.TxOut)) * minOutputAmount
+    bitcoinChange := totalInput - totalOutput - fee
+    fmt.Printf("💰 Transaction summary: %d sats in, %d sats out, %d fee, %d change\n",
+        totalInput, totalOutput, fee, bitcoinChange)
 
-	// Estimate fee
-	txSize := 100 + (len(tx.TxIn) * 150) + (len(tx.TxOut) * 50)
-	fee := (feeRate * int64(txSize)) / 1000
-	if fee < 300 {
-		fee = 300
-	}
+    if bitcoinChange > 546 {
+        // Create change address for Bitcoin
+        changeAddrStr, err := RunBitcoinCommand("getnewaddress")
+        if err != nil {
+            return nil, err
+        }
+        changeAddr, err := btcutil.DecodeAddress(changeAddrStr, Network)
+        if err != nil {
+            return nil, err
+        }
+        changeScript, err := txscript.PayToAddrScript(changeAddr)
+        if err != nil {
+            return nil, err
+        }
+        changeTxOut := wire.NewTxOut(bitcoinChange, changeScript)
+        tx.AddTxOut(changeTxOut)
+        fmt.Printf("📤 Added Bitcoin change output: %d sats to %s\n", bitcoinChange, changeAddrStr)
+    } else {
+        fmt.Printf("⚠️ Bitcoin change too small (%d sats), adding to fee\n", bitcoinChange)
+    }
 
-	bitcoinChange := totalInput - totalOutput - fee
-	fmt.Printf("💰 Transaction summary: %d sats in, %d sats out, %d fee, %d change\n",
-		totalInput, totalOutput, fee, bitcoinChange)
+    // Set up the witness for token script-path spend (first input)
+    witness := wire.TxWitness{
+        t.ScriptTree.Script,
+        t.ScriptTree.ControlBlock,
+    }
+    tx.TxIn[0].Witness = witness
 
-	if bitcoinChange > 546 {
-		// Create change address for Bitcoin
-		changeAddrStr, err := RunBitcoinCommand("getnewaddress")
-		if err != nil {
-			return nil, err
-		}
-		changeAddr, err := btcutil.DecodeAddress(changeAddrStr, Network)
-		if err != nil {
-			return nil, err
-		}
-		changeScript, err := txscript.PayToAddrScript(changeAddr)
-		if err != nil {
-			return nil, err
-		}
-		changeTxOut := wire.NewTxOut(bitcoinChange, changeScript)
-		tx.AddTxOut(changeTxOut)
-		fmt.Printf("📤 Added Bitcoin change output: %d sats to %s\n", bitcoinChange, changeAddrStr)
-	} else {
-		fmt.Printf("⚠️ Bitcoin change too small (%d sats), adding to fee\n", bitcoinChange)
-	}
+    fmt.Printf("✅ Created transaction with %d inputs and %d outputs\n", len(tx.TxIn), len(tx.TxOut))
 
-	// Set up the witness for token script-path spend (first input)
-	witness := wire.TxWitness{
-		t.ScriptTree.Script,
-		t.ScriptTree.ControlBlock,
-	}
-	tx.TxIn[0].Witness = witness
+    // Serialize the transaction for Bitcoin Core to sign
+    var buf bytes.Buffer
+    tx.Serialize(&buf)
+    txHex := hex.EncodeToString(buf.Bytes())
 
-	fmt.Printf("✅ Created transaction with %d inputs and %d outputs\n", len(tx.TxIn), len(tx.TxOut))
+    // Have Bitcoin Core sign the transaction
+    fmt.Println("🔐 Signing transaction with wallet...")
+    signedTxJSON, err := RunBitcoinCommand(fmt.Sprintf("signrawtransactionwithwallet %s", txHex))
+    if err != nil {
+        return nil, fmt.Errorf("failed to sign transaction: %w", err)
+    }
 
-	// Serialize the transaction for Bitcoin Core to sign
-	var buf bytes.Buffer
-	tx.Serialize(&buf)
-	txHex := hex.EncodeToString(buf.Bytes())
+    // Parse the signed transaction JSON
+    var signedTxResult struct {
+        Hex      string `json:"hex"`
+        Complete bool   `json:"complete"`
+    }
+    if err = json.Unmarshal([]byte(signedTxJSON), &signedTxResult); err != nil {
+        return nil, fmt.Errorf("failed to parse signed tx: %w", err)
+    }
 
-	// Have Bitcoin Core sign the transaction
-	fmt.Println("🔐 Signing transaction with wallet...")
-	signedTxJSON, err := RunBitcoinCommand(fmt.Sprintf("signrawtransactionwithwallet %s", txHex))
-	if err != nil {
-		return nil, fmt.Errorf("failed to sign transaction: %w", err)
-	}
+    if !signedTxResult.Complete {
+        return nil, fmt.Errorf("transaction signing incomplete")
+    }
 
-	// Parse the signed transaction JSON
-	var signedTxResult struct {
-		Hex      string `json:"hex"`
-		Complete bool   `json:"complete"`
-	}
-	if err = json.Unmarshal([]byte(signedTxJSON), &signedTxResult); err != nil {
-		return nil, fmt.Errorf("failed to parse signed tx: %w", err)
-	}
+    // Deserialize the signed transaction
+    signedTxBytes, err := hex.DecodeString(signedTxResult.Hex)
+    if err != nil {
+        return nil, fmt.Errorf("failed to decode signed tx: %w", err)
+    }
 
-	if !signedTxResult.Complete {
-		return nil, fmt.Errorf("transaction signing incomplete")
-	}
+    var signedTx wire.MsgTx
+    if err = signedTx.Deserialize(bytes.NewReader(signedTxBytes)); err != nil {
+        return nil, fmt.Errorf("failed to deserialize signed tx: %w", err)
+    }
 
-	// Deserialize the signed transaction
-	signedTxBytes, err := hex.DecodeString(signedTxResult.Hex)
-	if err != nil {
-		return nil, fmt.Errorf("failed to decode signed tx: %w", err)
-	}
-
-	var signedTx wire.MsgTx
-	if err = signedTx.Deserialize(bytes.NewReader(signedTxBytes)); err != nil {
-		return nil, fmt.Errorf("failed to deserialize signed tx: %w", err)
-	}
-
-	fmt.Println("✅ Transaction signing completed successfully")
-	return &signedTx, nil
+    fmt.Println("✅ Transaction signing completed successfully")
+    return &signedTx, nil
 }
+
+
+
 
 func main() {
 	// Command parsing
@@ -2193,7 +2555,51 @@ func main() {
 		}
 		os.Exit(0)
 
-	// ADD THE NEW CASE HERE:
+case "test-deterministic":
+		fmt.Println("🧪 Testing deterministic key derivation...")
+		
+		tokenID := "TEST-DETERMINISTIC"
+		utxoRef := "1234567890abcdef:0"
+		
+		fmt.Println("Test 1: First derivation")
+		token1, addr1, err := DeriveTokenKeyDeterministic(tokenID, utxoRef)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "❌ Error in test 1: %v\n", err)
+			os.Exit(1)
+		}
+		
+		fmt.Println("\nTest 2: Second derivation (should match)")
+		token2, addr2, err := DeriveTokenKeyDeterministic(tokenID, utxoRef)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "❌ Error in test 2: %v\n", err)
+			os.Exit(1)
+		}
+		
+		fmt.Printf("\n🔍 Results:\n")
+		fmt.Printf("  Address 1: %s\n", addr1)
+		fmt.Printf("  Address 2: %s\n", addr2)
+		fmt.Printf("  Addresses match: %v\n", addr1 == addr2)
+		
+		// Check if we have private keys (legacy wallet) or not (descriptor wallet)
+		if token1.PrivateKey != nil && token2.PrivateKey != nil {
+			fmt.Printf("  Private keys match: %v\n", bytes.Equal(token1.PrivateKey.Serialize(), token2.PrivateKey.Serialize()))
+			if addr1 == addr2 && bytes.Equal(token1.PrivateKey.Serialize(), token2.PrivateKey.Serialize()) {
+				fmt.Println("✅ Deterministic key derivation working correctly! (Legacy wallet mode)")
+			} else {
+				fmt.Println("❌ Deterministic key derivation failed!")
+			}
+		} else {
+			fmt.Printf("  Wallet mode: Descriptor (no private key extraction)\n")
+			if addr1 == addr2 {
+				fmt.Println("✅ Deterministic address generation working correctly! (Descriptor wallet mode)")
+			} else {
+				fmt.Println("❌ Deterministic address generation failed!")
+			}
+		}
+		
+		os.Exit(0)
+	
+
 	case "reveal-hybrid":
 		fmt.Println("🔄 Running direct hybrid reveal...")
 

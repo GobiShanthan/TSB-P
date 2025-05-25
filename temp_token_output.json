@@ -1,12 +1,14 @@
 {
-  "address": "tb1punhf44pdqqx9p7nlesutrf28waccv50jx76qean0xau9mpmcxgusv9t2pl",
+  "address": "tb1puvcp4d0956r4n3t97uwwj580nn08uqyhmt2llf0kz0k0pcpts22qajs5mq",
   "scriptHex": "",
   "controlBlockHex": "",
   "tokenData": {
-    "TokenID": "TORRAMTEST",
-    "Amount": 9999950000,
-    "TypeCode": 8,
-    "Metadata": "Torram Network native token",
-    "Timestamp": 1747533153
-  }
+    "TokenID": "SPX",
+    "Amount": 9000000000,
+    "TypeCode": 10,
+    "Metadata": "Synthetic S\u0026P 500 Index Token",
+    "Timestamp": 1747962528
+  },
+  "derivationPath": "",
+  "walletAddress": ""
 }

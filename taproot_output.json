@@ -1,14 +1,14 @@
 {
-  "address": "tb1pm7h89z2wgx36h840jsxmm5cfumyfw05lycraurkqsan029duneysf7nvrk",
-  "scriptHex": "516303545342106469726563742d77616c6c65740000000800000000000000010075757575124469726563742057616c6c657420546573740800000000682d36af75755168",
-  "controlBlockHex": "c0b1639520a8f3b0106f50431310251de9638bd1097331013c99b38dd4dcb02dee",
+  "address": "tb1pxd44uexus3ye8e8ayv8a2vm05n6ujy95rfacl7tpzwhnj5ntg6mqfm3dtv",
+  "scriptHex": "51630354534210535058000000000000000000000000000800000002540be4005a757575751d53796e746865746963205326502035303020496e64657820546f6b656e080000000068339de175755168",
+  "controlBlockHex": "c19179f15ad7fc07bf0b2bbe33c880d8e49242e6bd4b58cde438298401fa876d3e",
   "tokenData": {
-    "TokenID": "direct-wallet\u0000\u0000\u0000",
-    "Amount": 1,
-    "TypeCode": 0,
-    "Metadata": "Direct Wallet Test",
-    "Timestamp": 1747793583
+    "TokenID": "SPX\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000\u0000",
+    "Amount": 10000000000,
+    "TypeCode": 10,
+    "Metadata": "Synthetic S\u0026P 500 Index Token",
+    "Timestamp": 1748213217
   },
-  "derivationPath": "m/86'/1'/0'/0/1444186463",
-  "walletAddress": "tb1p7zmygcqh6m4se3lys656lxlg4memk6vcuckpntp8jthw55vxzftspcc7lg"
+  "derivationPath": "m/86'/1'/0'/0/1726819352",
+  "walletAddress": "tb1p5zh3stujyd5nwl52zaua8r7m76yxg4tjj3zmlvvp6l82r7fj993scuudyu"
 }
