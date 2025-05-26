@@ -1,13 +1,13 @@
 {
-  "address": "tb1puvcp4d0956r4n3t97uwwj580nn08uqyhmt2llf0kz0k0pcpts22qajs5mq",
+  "address": "tb1p9lyr53kqqx96ad34nts949h4h3t7l76npfw5xclevhmynwy8hsxqcz39wp",
   "scriptHex": "",
   "controlBlockHex": "",
   "tokenData": {
-    "TokenID": "SPX",
-    "Amount": 9000000000,
-    "TypeCode": 10,
-    "Metadata": "Synthetic S\u0026P 500 Index Token",
-    "Timestamp": 1747962528
+    "TokenID": "SPLIT-FINAL3",
+    "Amount": 45000000,
+    "TypeCode": 7,
+    "Metadata": "Final Split Test",
+    "Timestamp": 1748230105
   },
   "derivationPath": "",
   "walletAddress": ""

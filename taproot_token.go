@@ -488,12 +488,14 @@ func (t *TaprootToken) SplitToken(prevTxID string, prevTxIndex uint32, prevAmoun
     // ... rest of the function remains the same ...
     fmt.Println("🔄 Creating new token addresses...")
 
-    // 1. CREATE RECIPIENT TOKEN
-    recipientToken, err := NewTaprootToken()
-    if err != nil {
-        return nil, fmt.Errorf("failed to create recipient token: %w", err)
-    }
+// Create a deterministic token for the recipient using their wallet
+fmt.Println("🔑 Creating deterministic token for recipient...")
 
+// Use the funding transaction as UTXO reference for deterministic key
+recipientToken, err := NewTaprootToken()
+if err != nil {
+    return nil, fmt.Errorf("failed to create recipient token: %w", err)
+}
     recipientTokenData := &TokenData{
         TokenID:   tokenData.TokenID,
         Amount:    transferAmount,
@@ -547,12 +549,12 @@ func (t *TaprootToken) SplitToken(prevTxID string, prevTxIndex uint32, prevAmoun
     // 3. CREATE FUNDING TRANSACTION
     fmt.Println("🔄 Creating funding transaction...")
 
-    const dustAmount = int64(546)
+    const dustAmount = int64(10000)
     outputsNeeded := dustAmount * 2 // Both recipient and change
     if changeAmount == 0 {
         outputsNeeded = dustAmount // Only recipient
     }
-    fee := int64(1000)
+    fee := int64(10000)
     totalNeeded := outputsNeeded + fee
 
     fmt.Printf("💰 Need %d sats total, have %d sats in token UTXO\n", totalNeeded, prevAmount)
@@ -657,7 +659,7 @@ func (t *TaprootToken) SplitToken(prevTxID string, prevTxIndex uint32, prevAmoun
         feeEstimate := int64(len(tx.TxIn)*150 + len(tx.TxOut)*50 + 100)
         bitcoinChange := totalInput - outputsNeeded - feeEstimate
 
-        if bitcoinChange > 546 {
+        if bitcoinChange > 10000 {
             changeAddrStr, err := RunBitcoinCommand("getnewaddress")
             if err != nil {
                 return nil, err
@@ -877,7 +879,9 @@ func DirectUTXOTransferToken(tokenUTXO *FundingData, tokenData *TokenData,
     fmt.Println("🔧 Creating new token for recipient (descriptor wallet compatible)...")
     
     // Create a new token for the recipient
-    recipientToken, err := NewTaprootToken()
+// Create a deterministic token for the recipient
+// Create a new token for the recipient  
+recipientToken, err := NewTaprootToken()
     if err != nil {
         return "", nil, fmt.Errorf("failed to create recipient token: %w", err)
     }
@@ -950,13 +954,9 @@ func DirectUTXOTransferToken(tokenUTXO *FundingData, tokenData *TokenData,
     }
 
     // Save the recipient's token key
-    err = recipientToken.SavePrivateKey("recipient_token_key.hex")
-    if err != nil {
-        fmt.Printf("⚠️ Warning: Could not save recipient key: %v\n", err)
-    } else {
-        fmt.Println("💾 Saved recipient token key to: recipient_token_key.hex")
-        fmt.Println("📧 Send this file to the recipient so they can manage their token")
-    }
+// No hex key file needed - recipient uses their own wallet keys!
+fmt.Println("✅ Recipient will use their own wallet keys - no hex file needed!")
+fmt.Println("📧 The recipient can now manage tokens using their wallet directly")
 
     // Create recipient funding data
     recipientFunding := &FundingData{
@@ -1468,18 +1468,54 @@ func DeriveTokenKeyDeterministic(tokenID string, utxoRef string) (*TaprootToken,
         fmt.Printf("✅ Created new deterministic address: %s\n", addrOutput)
     }
     
-    // Try to get private key (works with legacy wallets)
-    privKeyWIF, err := RunBitcoinCommand(fmt.Sprintf("dumpprivkey %s", addrOutput))
+// Try to get private key (works with legacy wallets)
+privKeyWIF, err := RunBitcoinCommand(fmt.Sprintf("dumpprivkey %s", addrOutput))
+if err != nil {
+    // Descriptor wallet mode - get public key from address info
+    fmt.Printf("⚠️ Descriptor wallet mode - extracting public key\n")
+    
+    addrInfoJSON, err := RunBitcoinCommand(fmt.Sprintf("getaddressinfo %s", addrOutput))
     if err != nil {
-        // Descriptor wallet mode - no private key extraction
-        fmt.Printf("⚠️ Descriptor wallet mode - wallet will handle signing\n")
-        
-        token := &TaprootToken{
-            PublicKey: nil, // Will be set when needed
-        }
-        
-        return token, addrOutput, nil
+        return nil, "", fmt.Errorf("failed to get address info: %w", err)
     }
+    
+    var addrInfo map[string]interface{}
+    if err := json.Unmarshal([]byte(addrInfoJSON), &addrInfo); err != nil {
+        return nil, "", fmt.Errorf("failed to parse address info: %w", err)
+    }
+    
+    // Extract public key - try multiple fields
+    var pubkeyHex string
+    if val, ok := addrInfo["pubkey"].(string); ok {
+        pubkeyHex = val
+    } else if embedded, ok := addrInfo["embedded"].(map[string]interface{}); ok {
+        if val, ok := embedded["inner_pubkey"].(string); ok {
+            pubkeyHex = val
+        }
+    }
+    
+    if pubkeyHex == "" {
+        return nil, "", fmt.Errorf("could not extract public key from address info")
+    }
+    
+    // Parse the public key
+    pubkeyBytes, err := hex.DecodeString(pubkeyHex)
+    if err != nil {
+        return nil, "", fmt.Errorf("invalid pubkey hex: %w", err)
+    }
+    
+    pubkey, err := btcec.ParsePubKey(pubkeyBytes)
+    if err != nil {
+        return nil, "", fmt.Errorf("failed to parse pubkey: %w", err)
+    }
+    
+    token := &TaprootToken{
+        PublicKey: pubkey,
+        // PrivateKey: nil - wallet will handle signing
+    }
+    
+    return token, addrOutput, nil
+}
     
     // Legacy wallet mode - we have the private key
     wif, err := btcutil.DecodeWIF(privKeyWIF)
@@ -1529,4 +1565,15 @@ func findAddressByLabel(targetLabel string) (string, error) {
     
     // Always return the first address (lexicographically)
     return addrList[0], nil
+}
+
+
+// GetDeterministicTokenKey - wrapper function that was missing
+func GetDeterministicTokenKey(tokenID string, txid string, vout uint32) (*TaprootToken, error) {
+    utxoRef := fmt.Sprintf("%s:%d", txid, vout)
+    token, _, err := DeriveTokenKeyDeterministic(tokenID, utxoRef)
+    if err != nil {
+        return nil, fmt.Errorf("failed to derive deterministic token key: %w", err)
+    }
+    return token, nil
 }
