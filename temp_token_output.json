@@ -1,13 +1,13 @@
 {
-  "address": "tb1p9lyr53kqqx96ad34nts949h4h3t7l76npfw5xclevhmynwy8hsxqcz39wp",
+  "address": "tb1p6ryhlu8mjvt7jy5w5jqh2v4dazlcmayesg5medmzlv8pyjze54xsv4h2cn",
   "scriptHex": "",
   "controlBlockHex": "",
   "tokenData": {
-    "TokenID": "SPLIT-FINAL3",
+    "TokenID": "FIRSTFINALTEST",
     "Amount": 45000000,
     "TypeCode": 7,
     "Metadata": "Final Split Test",
-    "Timestamp": 1748230105
+    "Timestamp": 1748312969
   },
   "derivationPath": "",
   "walletAddress": ""
