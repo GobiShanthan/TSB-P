@@ -1,14 +1,14 @@
 {
-  "address": "tb1px55wcr2a6jcjhkhvt90jx8qgc7vs3zn5a93d2zxx62vn6qkskr7qpwcvl6",
-  "scriptHex": "51630354534210464952535446494e414c544553540000080000000002faf08057757575751046696e616c2053706c6974205465737408000000006835238975755168",
-  "controlBlockHex": "c1a2a17c237e46f72e11d3198c0b814978d1fda0650754daef59e12f219d5c720f",
+  "address": "tb1pysjp354r25l5jaxgq3t4uc5p0924vv7yxqznekqrukss42npt4ss7ap97s",
+  "scriptHex": "5163035453421053504c49542d46494e414c3300000000080000000002faf08057757575750e436c65616e75704e657754657374080000000068353c8075755168",
+  "controlBlockHex": "c06510fa61425c6ded09b61d69d31678e191d5e4ea3f1d3fceead53d07d212c1a9",
   "tokenData": {
-    "TokenID": "FIRSTFINALTEST\u0000\u0000",
+    "TokenID": "SPLIT-FINAL3\u0000\u0000\u0000\u0000",
     "Amount": 50000000,
     "TypeCode": 7,
-    "Metadata": "Final Split Test",
-    "Timestamp": 1748312969
+    "Metadata": "CleanupNewTest",
+    "Timestamp": 1748319360
   },
-  "derivationPath": "m/86'/1'/0'/0/1460663953",
-  "walletAddress": "tb1pfk2l7ghurwvht7l7t56t4xsu2yxt2mc4fdkgnl5crng439ml0r4q7raeva"
+  "derivationPath": "m/86'/1'/0'/0/1968937862",
+  "walletAddress": "tb1psfm48lg080uc285ed4za7n3r332ja343fy6fsdyzumvteeuwnlmsy45crf"
 }

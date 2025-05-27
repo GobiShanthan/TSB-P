@@ -878,8 +878,6 @@ func DirectUTXOTransferToken(tokenUTXO *FundingData, tokenData *TokenData,
     
     fmt.Println("🔧 Creating new token for recipient (descriptor wallet compatible)...")
     
-    // Create a new token for the recipient
-// Create a deterministic token for the recipient
 // Create a new token for the recipient  
 recipientToken, err := NewTaprootToken()
     if err != nil {
@@ -1241,7 +1239,6 @@ func (t *TaprootToken) CreateTaprootOutputWithOwnership(
 	return tree, nil
 }
 
-// Add to taproot_token.go
 
 // BIP32 derivation path constants
 const (
