@@ -1,14 +1,14 @@
 {
-  "address": "tb1pysjp354r25l5jaxgq3t4uc5p0924vv7yxqznekqrukss42npt4ss7ap97s",
-  "scriptHex": "5163035453421053504c49542d46494e414c3300000000080000000002faf08057757575750e436c65616e75704e657754657374080000000068353c8075755168",
-  "controlBlockHex": "c06510fa61425c6ded09b61d69d31678e191d5e4ea3f1d3fceead53d07d212c1a9",
+  "address": "tb1phx2pzx3am7ccdumfylwjk63w4cd8xegz32jgspwnldhr67shtdjs9f53pr",
+  "scriptHex": "51630354534210476f6269546f6b656e32000000000000080000000002faf080577575757518476f626920546f6b656e205472616e73666572207465737408000000006841482a75755168",
+  "controlBlockHex": "c0e9825ec6022e287b1c2e2b8665d89bb3a05a0d11cfc5e0e58db24f2e24b9aae0",
   "tokenData": {
-    "TokenID": "SPLIT-FINAL3\u0000\u0000\u0000\u0000",
+    "TokenID": "GobiToken2\u0000\u0000\u0000\u0000\u0000\u0000",
     "Amount": 50000000,
     "TypeCode": 7,
-    "Metadata": "CleanupNewTest",
-    "Timestamp": 1748319360
+    "Metadata": "Gobi Token Transfer test",
+    "Timestamp": 1749108778
   },
-  "derivationPath": "m/86'/1'/0'/0/1968937862",
-  "walletAddress": "tb1psfm48lg080uc285ed4za7n3r332ja343fy6fsdyzumvteeuwnlmsy45crf"
+  "derivationPath": "m/86'/1'/0'/0/1982751949",
+  "walletAddress": "tb1pyqtkanrgvcy6ph3hzex0l7xe2xxc45srtrtl62athqzatl3c0zgqjdc4q5"
 }

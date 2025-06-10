@@ -1,13 +1,13 @@
 {
-  "address": "tb1pcnw6n845qad0smhd8xvmgctfh7s03z0d38vyv5hgum8nylqeamlqdel5y2",
+  "address": "tb1pwwuyktjuwrf5wcd04z4wa5kcf07cke8lzwpeend0jfqra35aljdqq7j9qm",
   "scriptHex": "",
   "controlBlockHex": "",
   "tokenData": {
-    "TokenID": "SPLIT-FINAL3",
+    "TokenID": "LEE TOKEN",
     "Amount": 45000000,
     "TypeCode": 7,
-    "Metadata": "CleanupNewTest",
-    "Timestamp": 1748319360
+    "Metadata": "lee transfer token test",
+    "Timestamp": 1748369938
   },
   "derivationPath": "",
   "walletAddress": ""
