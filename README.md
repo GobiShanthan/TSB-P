@@ -200,11 +200,7 @@ bitcoin-cli -testnet -rpcwallet=token_wallet listunspent
    Metadata: My Custom Token
    UTXO: 1ec3f5ec1757fb00feec231d111bf9f94bd55db0749ef3bfc360a33e5db26d77:0 (450 sats)
 
-2. Token: SPX
-   Amount: 10000000000
-   Metadata: Synthetic S&P 500 Index Token
-   UTXO: 19ed82fbf240a3ea8dac3b4d1de9a50a13618b8cae8e98a9386d67aa6fca66d5:0 (450 sats)
-```
+2. 
 
 **⚠️ Important**: Wait for the token to appear in your wallet before attempting transfers. This may take a few moments due to Bitcoin network block times and wallet synchronization.
 

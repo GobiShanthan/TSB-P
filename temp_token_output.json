@@ -1,13 +1,13 @@
 {
-  "address": "tb1pwwuyktjuwrf5wcd04z4wa5kcf07cke8lzwpeend0jfqra35aljdqq7j9qm",
+  "address": "tb1pzkk3t7z7l06wd9a22xgguxr6a5wyt98ahu696vflljde77yhhjgs3clrnk",
   "scriptHex": "",
   "controlBlockHex": "",
   "tokenData": {
-    "TokenID": "LEE TOKEN",
-    "Amount": 45000000,
-    "TypeCode": 7,
-    "Metadata": "lee transfer token test",
-    "Timestamp": 1748369938
+    "TokenID": "AGG",
+    "Amount": 1000000,
+    "TypeCode": 0,
+    "Metadata": "N:iShares Core U.S. Aggregate Bond ETF C:464287226 I:US4642872265 S:NA",
+    "Timestamp": 1751924112
   },
   "derivationPath": "",
   "walletAddress": ""
