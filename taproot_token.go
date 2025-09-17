@@ -37,7 +37,50 @@ type TokenData struct {
 	TypeCode  byte
 	Metadata  string
 	Timestamp uint64
+	// New compliance fields
+	ComplianceFlags uint32  // Bitmap for compliance requirements
+	JurisdictionBits uint16 // Bitmap for allowed jurisdictions
+	IdentityHash    string  // SHA256 hash of KYC'd identity (privacy-preserving)
+	Expiry          uint64  // Token expiry timestamp (0 = no expiry)
 }
+
+// Compliance flag constants
+const (
+	FLAG_KYC_REQUIRED     uint32 = 1 << 0  // Bit 0: KYC required
+	FLAG_ACCREDITED_ONLY  uint32 = 1 << 1  // Bit 1: Accredited investors only
+	FLAG_NO_US_PERSONS    uint32 = 1 << 2  // Bit 2: Restricted from US persons
+	FLAG_FREEZE_ENABLED   uint32 = 1 << 3  // Bit 3: Can be frozen by issuer
+	FLAG_CLAWBACK_ENABLED uint32 = 1 << 4  // Bit 4: Can be clawed back
+	FLAG_TRANSFER_RESTRICTED uint32 = 1 << 5 // Bit 5: Transfer restrictions apply
+)
+
+// Jurisdiction bit constants (16 bits max)
+const (
+	JURIS_US  uint16 = 1 << 0  // United States
+	JURIS_EU  uint16 = 1 << 1  // European Union
+	JURIS_UK  uint16 = 1 << 2  // United Kingdom
+	JURIS_CA  uint16 = 1 << 3  // Canada
+	JURIS_JP  uint16 = 1 << 4  // Japan
+	JURIS_SG  uint16 = 1 << 5  // Singapore
+	JURIS_CH  uint16 = 1 << 6  // Switzerland
+	JURIS_AU  uint16 = 1 << 7  // Australia
+	JURIS_HK  uint16 = 1 << 8  // Hong Kong
+	JURIS_AE  uint16 = 1 << 9  // UAE
+)
+
+// TypeCode constants for different token types
+const (
+	TYPE_STANDARD     byte = 0  // Standard token, no compliance
+	TYPE_STABLECOIN   byte = 1  // Stablecoin with basic KYC
+	TYPE_SECURITY     byte = 2  // Security token with full compliance
+	TYPE_BOND         byte = 3  // Bond token with maturity
+	TYPE_EQUITY       byte = 4  // Equity token with voting rights
+	TYPE_RESTRICTED   byte = 5  // Restricted token with transfer limits
+	TYPE_NFT          byte = 6  // Non-fungible token
+	TYPE_WRAPPED      byte = 7  // Wrapped asset from another chain
+	TYPE_VESTING      byte = 8  // Vesting token with unlock schedule
+	TYPE_GOVERNANCE   byte = 9  // Governance token for voting
+)
 
 func UpdateWithCanonicalTokenID(tokenData *TokenData, revealTxID string) {
     // Extract original name without any txid suffix
@@ -88,32 +131,67 @@ func (t *TokenData) ToBytes() []byte {
 	tokenIDLen := uint16(len(tokenIDBuf))
 	metadataBuf := []byte(t.Metadata)
 	metadataLen := uint16(len(metadataBuf))
+	identityHashBuf := []byte(t.IdentityHash)
+	identityHashLen := uint16(len(identityHashBuf))
 
-	totalSize := 2 + len(tokenIDBuf) + 8 + 2 + len(metadataBuf)
+	// Calculate total size with new fields
+	totalSize := 2 + len(tokenIDBuf) + 8 + 1 + 2 + len(metadataBuf) + 
+		8 + 4 + 2 + 2 + len(identityHashBuf) + 8
+
 	buf := make([]byte, totalSize)
 
 	offset := 0
+	// TokenID
 	binary.LittleEndian.PutUint16(buf[offset:], tokenIDLen)
 	offset += 2
 	copy(buf[offset:], tokenIDBuf)
 	offset += len(tokenIDBuf)
 
+	// Amount
 	binary.LittleEndian.PutUint64(buf[offset:], t.Amount)
 	offset += 8
 
+	// TypeCode (1 byte)
+	buf[offset] = t.TypeCode
+	offset += 1
+
+	// Metadata
 	binary.LittleEndian.PutUint16(buf[offset:], metadataLen)
 	offset += 2
 	copy(buf[offset:], metadataBuf)
+	offset += len(metadataBuf)
+
+	// Timestamp
+	binary.LittleEndian.PutUint64(buf[offset:], t.Timestamp)
+	offset += 8
+
+	// ComplianceFlags (new)
+	binary.LittleEndian.PutUint32(buf[offset:], t.ComplianceFlags)
+	offset += 4
+
+	// JurisdictionBits (new)
+	binary.LittleEndian.PutUint16(buf[offset:], t.JurisdictionBits)
+	offset += 2
+
+	// IdentityHash (new)
+	binary.LittleEndian.PutUint16(buf[offset:], identityHashLen)
+	offset += 2
+	copy(buf[offset:], identityHashBuf)
+	offset += len(identityHashBuf)
+
+	// Expiry (new)
+	binary.LittleEndian.PutUint64(buf[offset:], t.Expiry)
 
 	return buf
 }
 
 func TokenDataFromBytes(buf []byte) (*TokenData, error) {
-	if len(buf) < 12 {
+	if len(buf) < 23 { // Minimum size with new fields
 		return nil, errors.New("buffer too small for token data")
 	}
 
 	offset := 0
+	// TokenID
 	tokenIDLen := binary.LittleEndian.Uint16(buf[offset:])
 	offset += 2
 	if offset+int(tokenIDLen) > len(buf) {
@@ -122,23 +200,62 @@ func TokenDataFromBytes(buf []byte) (*TokenData, error) {
 	tokenID := string(buf[offset : offset+int(tokenIDLen)])
 	offset += int(tokenIDLen)
 
+	// Amount
 	amount := binary.LittleEndian.Uint64(buf[offset:])
 	offset += 8
 
+	// TypeCode
+	typeCode := buf[offset]
+	offset += 1
+
+	// Metadata
 	metadataLen := binary.LittleEndian.Uint16(buf[offset:])
 	offset += 2
 	if offset+int(metadataLen) > len(buf) {
 		return nil, errors.New("invalid metadata length")
 	}
 	metadata := string(buf[offset : offset+int(metadataLen)])
+	offset += int(metadataLen)
+
+	// Timestamp
+	timestamp := binary.LittleEndian.Uint64(buf[offset:])
+	offset += 8
+
+	// ComplianceFlags
+	complianceFlags := binary.LittleEndian.Uint32(buf[offset:])
+	offset += 4
+
+	// JurisdictionBits
+	jurisdictionBits := binary.LittleEndian.Uint16(buf[offset:])
+	offset += 2
+
+	// IdentityHash
+	identityHashLen := binary.LittleEndian.Uint16(buf[offset:])
+	offset += 2
+	var identityHash string
+	if identityHashLen > 0 {
+		if offset+int(identityHashLen) > len(buf) {
+			return nil, errors.New("invalid identity hash length")
+		}
+		identityHash = string(buf[offset : offset+int(identityHashLen)])
+		offset += int(identityHashLen)
+	}
+
+	// Expiry
+	expiry := binary.LittleEndian.Uint64(buf[offset:])
 
 	return &TokenData{
-		TokenID:  tokenID,
-		Amount:   amount,
-		Metadata: metadata,
+		TokenID:          tokenID,
+		Amount:           amount,
+		TypeCode:         typeCode,
+		Metadata:         metadata,
+		Timestamp:        timestamp,
+		ComplianceFlags:  complianceFlags,
+		JurisdictionBits: jurisdictionBits,
+		IdentityHash:     identityHash,
+		Expiry:           expiry,
 	}, nil
 }
-
 func TaggedHash(tag string, data []byte) []byte {
 	tagHash := sha256.Sum256([]byte(tag))
 	h := sha256.New()
@@ -189,8 +306,8 @@ func LoadTaprootToken(privKeyHex string) (*TaprootToken, error) {
 func (t *TaprootToken) CreateTaprootOutput(token *TokenData) (*TaprootScriptTree, error) {
     builder := txscript.NewScriptBuilder()
 
-    builder.AddOp(txscript.OP_TRUE)  // 👈 ADD this first
-    builder.AddOp(txscript.OP_IF)    // 👈 THEN this
+    builder.AddOp(txscript.OP_TRUE)
+    builder.AddOp(txscript.OP_IF)
 
     // Push standard fields
     builder.AddData([]byte("TSB"))                             // Marker
@@ -213,11 +330,42 @@ func (t *TaprootToken) CreateTaprootOutput(token *TokenData) (*TaprootScriptTree
     builder.AddData(timestampBytes)                            // Timestamp
 
     // Drop optional fields
-    builder.AddOp(txscript.OP_DROP)                            // Timestamp
-    builder.AddOp(txscript.OP_DROP)                            // Metadata
+    builder.AddOp(txscript.OP_DROP)
+    builder.AddOp(txscript.OP_DROP)
 
-    // Final programmable logic (basic OP_TRUE for now)
-    builder.AddOp(txscript.OP_TRUE)
+    // Push compliance fields (NEW)
+    complianceFlagsBytes := make([]byte, 4)
+    binary.BigEndian.PutUint32(complianceFlagsBytes, token.ComplianceFlags)
+    builder.AddData(complianceFlagsBytes)                      // ComplianceFlags
+    
+    jurisdictionBytes := make([]byte, 2)
+    binary.BigEndian.PutUint16(jurisdictionBytes, token.JurisdictionBits)
+    builder.AddData(jurisdictionBytes)                         // JurisdictionBits
+    
+    if token.IdentityHash != "" {
+        builder.AddData([]byte(token.IdentityHash))            // IdentityHash
+    } else {
+        builder.AddData([]byte{0x00})                          // Empty identity hash
+    }
+    
+    expiryBytes := make([]byte, 8)
+    binary.BigEndian.PutUint64(expiryBytes, token.Expiry)
+    builder.AddData(expiryBytes)                               // Expiry
+
+    // Drop compliance fields
+    builder.AddOp(txscript.OP_DROP)                            // Expiry
+    builder.AddOp(txscript.OP_DROP)                            // IdentityHash
+    builder.AddOp(txscript.OP_DROP)                            // JurisdictionBits
+    builder.AddOp(txscript.OP_DROP)                            // ComplianceFlags
+
+    // Compliance validation logic (NEW)
+    if token.ComplianceFlags&FLAG_KYC_REQUIRED != 0 {
+        // If KYC is required, check that identity hash is present
+        // This is simplified - real implementation would verify signature
+        builder.AddOp(txscript.OP_TRUE)
+    } else {
+        builder.AddOp(txscript.OP_TRUE)
+    }
 
     // End with OP_ENDIF
     builder.AddOp(txscript.OP_ENDIF)
@@ -1095,7 +1243,7 @@ func (t *TaprootToken) RevealTokenDataFromHex(rawTxHex string) (*TokenData, erro
         return nil, fmt.Errorf("failed to disassemble script: %w", err)
     }
     parts := strings.Split(asm, " ")
-    if len(parts) < 16 {
+    if len(parts) < 20 { // Need more parts for compliance fields
         return nil, fmt.Errorf("script too short: %d parts", len(parts))
     }
 
@@ -1130,11 +1278,11 @@ func (t *TaprootToken) RevealTokenDataFromHex(rawTxHex string) (*TokenData, erro
     amount := binary.BigEndian.Uint64(amtBytes)
 
     // e) TypeCode
-    tc, err := strconv.ParseUint(parts[5], 10, 8)
-    if err != nil {
+    tcBytes, err := hex.DecodeString(parts[5])
+    if err != nil || len(tcBytes) != 1 {
         return nil, fmt.Errorf("invalid type code: %w", err)
     }
-    typeCode := byte(tc)
+    typeCode := tcBytes[0]
 
     // f) Skip 4 × OP_DROP (parts[6] through parts[9])
 
@@ -1152,16 +1300,56 @@ func (t *TaprootToken) RevealTokenDataFromHex(rawTxHex string) (*TokenData, erro
     }
     timestamp := binary.BigEndian.Uint64(tsBytes)
 
-    // Return only the raw fields—no suffix, no TXID appended.
+    // i) Skip 2 × OP_DROP (parts[12] and parts[13])
+
+    // j) ComplianceFlags (NEW - 4-byte big endian)
+    var complianceFlags uint32
+    if len(parts) > 14 {
+        cfBytes, err := hex.DecodeString(parts[14])
+        if err == nil && len(cfBytes) == 4 {
+            complianceFlags = binary.BigEndian.Uint32(cfBytes)
+        }
+    }
+
+    // k) JurisdictionBits (NEW - 2-byte big endian)
+    var jurisdictionBits uint16
+    if len(parts) > 15 {
+        jbBytes, err := hex.DecodeString(parts[15])
+        if err == nil && len(jbBytes) == 2 {
+            jurisdictionBits = binary.BigEndian.Uint16(jbBytes)
+        }
+    }
+
+    // l) IdentityHash (NEW)
+    var identityHash string
+    if len(parts) > 16 {
+        idBytes, err := hex.DecodeString(parts[16])
+        if err == nil && len(idBytes) > 1 && idBytes[0] != 0x00 {
+            identityHash = string(idBytes)
+        }
+    }
+
+    // m) Expiry (NEW - 8-byte big endian)
+    var expiry uint64
+    if len(parts) > 17 {
+        expBytes, err := hex.DecodeString(parts[17])
+        if err == nil && len(expBytes) == 8 {
+            expiry = binary.BigEndian.Uint64(expBytes)
+        }
+    }
+
     return &TokenData{
-        TokenID:   tokenID,
-        Amount:    amount,
-        TypeCode:  typeCode,
-        Metadata:  metadata,
-        Timestamp: timestamp,
+        TokenID:          tokenID,
+        Amount:           amount,
+        TypeCode:         typeCode,
+        Metadata:         metadata,
+        Timestamp:        timestamp,
+        ComplianceFlags:  complianceFlags,
+        JurisdictionBits: jurisdictionBits,
+        IdentityHash:     identityHash,
+        Expiry:           expiry,
     }, nil
 }
-
 
 
 func (t *TaprootToken) CreateTaprootOutputWithOwnership(
@@ -1573,4 +1761,192 @@ func GetDeterministicTokenKey(tokenID string, txid string, vout uint32) (*Taproo
         return nil, fmt.Errorf("failed to derive deterministic token key: %w", err)
     }
     return token, nil
+}
+
+
+
+
+// ============= COMPLIANCE HELPER FUNCTIONS =============
+
+// ValidateCompliance checks if a transfer is allowed based on compliance rules
+func ValidateCompliance(token *TokenData, senderIdentityHash string, recipientIdentityHash string, recipientJurisdiction uint16) error {
+    // Check if token has expired
+    if token.Expiry > 0 && uint64(time.Now().Unix()) > token.Expiry {
+        return fmt.Errorf("token has expired at %d", token.Expiry)
+    }
+    
+    // Check KYC requirement
+    if token.ComplianceFlags&FLAG_KYC_REQUIRED != 0 {
+        if recipientIdentityHash == "" {
+            return fmt.Errorf("KYC required but recipient has no verified identity")
+        }
+    }
+    
+    // Check accredited investor requirement
+    if token.ComplianceFlags&FLAG_ACCREDITED_ONLY != 0 {
+        // In real implementation, this would check against accredited investor registry
+        if !strings.Contains(recipientIdentityHash, "accredited") {
+            return fmt.Errorf("only accredited investors can hold this token")
+        }
+    }
+    
+    // Check US persons restriction
+    if token.ComplianceFlags&FLAG_NO_US_PERSONS != 0 {
+        if recipientJurisdiction&JURIS_US != 0 {
+            return fmt.Errorf("US persons cannot hold this token")
+        }
+    }
+    
+    // Check jurisdiction restrictions
+    if token.JurisdictionBits != 0 {
+        if recipientJurisdiction&token.JurisdictionBits == 0 {
+            return fmt.Errorf("recipient jurisdiction %b not in allowed jurisdictions %b", 
+                recipientJurisdiction, token.JurisdictionBits)
+        }
+    }
+    
+    // Check if transfers are restricted
+    if token.ComplianceFlags&FLAG_TRANSFER_RESTRICTED != 0 {
+        // In real implementation, this would check against whitelist
+        return fmt.Errorf("transfers are currently restricted for this token")
+    }
+    
+    return nil
+}
+
+// GenerateIdentityHash creates a privacy-preserving hash of user identity data
+func GenerateIdentityHash(kycData map[string]string) string {
+    // Combine KYC data in a deterministic way
+    var data string
+    data += kycData["firstName"] + "|"
+    data += kycData["lastName"] + "|"
+    data += kycData["dateOfBirth"] + "|"
+    data += kycData["countryCode"] + "|"
+    data += kycData["idNumber"] + "|"
+    data += kycData["idType"] + "|"
+    data += kycData["accreditedStatus"] + "|"
+    data += kycData["kycProvider"] + "|"
+    data += kycData["kycDate"]
+    
+    // Hash the combined data
+    hash := sha256.Sum256([]byte(data))
+    return hex.EncodeToString(hash[:])
+}
+
+// ParseJurisdictionString converts jurisdiction codes to bitmap
+func ParseJurisdictionString(jurisdictions string) uint16 {
+    var bits uint16
+    codes := strings.Split(jurisdictions, ",")
+    
+    for _, code := range codes {
+        switch strings.TrimSpace(strings.ToUpper(code)) {
+        case "US":
+            bits |= JURIS_US
+        case "EU":
+            bits |= JURIS_EU
+        case "UK":
+            bits |= JURIS_UK
+        case "CA":
+            bits |= JURIS_CA
+        case "JP":
+            bits |= JURIS_JP
+        case "SG":
+            bits |= JURIS_SG
+        case "CH":
+            bits |= JURIS_CH
+        case "AU":
+            bits |= JURIS_AU
+        case "HK":
+            bits |= JURIS_HK
+        case "AE":
+            bits |= JURIS_AE
+        }
+    }
+    
+    return bits
+}
+
+// JurisdictionBitsToString converts bitmap back to readable string
+func JurisdictionBitsToString(bits uint16) string {
+    var jurisdictions []string
+    
+    if bits&JURIS_US != 0 {
+        jurisdictions = append(jurisdictions, "US")
+    }
+    if bits&JURIS_EU != 0 {
+        jurisdictions = append(jurisdictions, "EU")
+    }
+    if bits&JURIS_UK != 0 {
+        jurisdictions = append(jurisdictions, "UK")
+    }
+    if bits&JURIS_CA != 0 {
+        jurisdictions = append(jurisdictions, "CA")
+    }
+    if bits&JURIS_JP != 0 {
+        jurisdictions = append(jurisdictions, "JP")
+    }
+    if bits&JURIS_SG != 0 {
+        jurisdictions = append(jurisdictions, "SG")
+    }
+    if bits&JURIS_CH != 0 {
+        jurisdictions = append(jurisdictions, "CH")
+    }
+    if bits&JURIS_AU != 0 {
+        jurisdictions = append(jurisdictions, "AU")
+    }
+    if bits&JURIS_HK != 0 {
+        jurisdictions = append(jurisdictions, "HK")
+    }
+    if bits&JURIS_AE != 0 {
+        jurisdictions = append(jurisdictions, "AE")
+    }
+    
+    return strings.Join(jurisdictions, ",")
+}
+
+// GetComplianceFlagsDescription returns human-readable compliance requirements
+func GetComplianceFlagsDescription(flags uint32) string {
+    var requirements []string
+    
+    if flags&FLAG_KYC_REQUIRED != 0 {
+        requirements = append(requirements, "KYC Required")
+    }
+    if flags&FLAG_ACCREDITED_ONLY != 0 {
+        requirements = append(requirements, "Accredited Investors Only")
+    }
+    if flags&FLAG_NO_US_PERSONS != 0 {
+        requirements = append(requirements, "No US Persons")
+    }
+    if flags&FLAG_FREEZE_ENABLED != 0 {
+        requirements = append(requirements, "Freezable")
+    }
+    if flags&FLAG_CLAWBACK_ENABLED != 0 {
+        requirements = append(requirements, "Clawback Enabled")
+    }
+    if flags&FLAG_TRANSFER_RESTRICTED != 0 {
+        requirements = append(requirements, "Transfer Restricted")
+    }
+    
+    if len(requirements) == 0 {
+        return "No Restrictions"
+    }
+    
+    return strings.Join(requirements, ", ")
+}
+
+// IsTokenCompliant checks if a token meets basic compliance requirements
+func IsTokenCompliant(token *TokenData) bool {
+    // Check expiry
+    if token.Expiry > 0 && uint64(time.Now().Unix()) > token.Expiry {
+        return false
+    }
+    
+    // For regulated tokens, ensure identity hash exists
+    if token.TypeCode == TYPE_SECURITY || token.TypeCode == TYPE_BOND || token.TypeCode == TYPE_EQUITY {
+        if token.ComplianceFlags&FLAG_KYC_REQUIRED != 0 && token.IdentityHash == "" {
+            return false
+        }
+    }
+    
+    return true
 }
