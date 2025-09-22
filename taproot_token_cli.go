@@ -246,27 +246,27 @@ func CreateHybridTaprootOutput(token *TokenData, recipientPubKey *btcec.PublicKe
 	// Push compliance fields (NEW)
 	complianceFlagsBytes := make([]byte, 4)
 	binary.BigEndian.PutUint32(complianceFlagsBytes, token.ComplianceFlags)
-	builder.AddData(complianceFlagsBytes)                      // ComplianceFlags
-	
+	builder.AddData(complianceFlagsBytes) // ComplianceFlags
+
 	jurisdictionBytes := make([]byte, 2)
 	binary.BigEndian.PutUint16(jurisdictionBytes, token.JurisdictionBits)
-	builder.AddData(jurisdictionBytes)                         // JurisdictionBits
-	
+	builder.AddData(jurisdictionBytes) // JurisdictionBits
+
 	if token.IdentityHash != "" {
-		builder.AddData([]byte(token.IdentityHash))            // IdentityHash
+		builder.AddData([]byte(token.IdentityHash)) // IdentityHash
 	} else {
-		builder.AddData([]byte{0x00})                          // Empty identity hash
+		builder.AddData([]byte{0x00}) // Empty identity hash
 	}
-	
+
 	expiryBytes := make([]byte, 8)
 	binary.BigEndian.PutUint64(expiryBytes, token.Expiry)
-	builder.AddData(expiryBytes)                               // Expiry
+	builder.AddData(expiryBytes) // Expiry
 
 	// Drop compliance fields
-	builder.AddOp(txscript.OP_DROP)                            // Expiry
-	builder.AddOp(txscript.OP_DROP)                            // IdentityHash
-	builder.AddOp(txscript.OP_DROP)                            // JurisdictionBits
-	builder.AddOp(txscript.OP_DROP)                            // ComplianceFlags
+	builder.AddOp(txscript.OP_DROP) // Expiry
+	builder.AddOp(txscript.OP_DROP) // IdentityHash
+	builder.AddOp(txscript.OP_DROP) // JurisdictionBits
+	builder.AddOp(txscript.OP_DROP) // ComplianceFlags
 
 	// Ownership verification with the recipient's key
 	builder.AddData(recipientPubKey.SerializeCompressed())
@@ -323,8 +323,8 @@ func CreateHybridTaprootOutput(token *TokenData, recipientPubKey *btcec.PublicKe
 }
 
 // CreateHybridToken creates a Taproot token that will be recognized by the recipient's wallet
-func CreateHybridToken(tokenID string, amount uint64, metadata string, typeCode uint8, 
-	complianceFlags uint32, jurisdictions string, identityHash string, expiryDays uint64, 
+func CreateHybridToken(tokenID string, amount uint64, metadata string, typeCode uint8,
+	complianceFlags uint32, jurisdictions string, identityHash string, expiryDays uint64,
 	recipientPubKey *btcec.PublicKey) (*OutputData, error) {
 	fmt.Println("🔄 Creating hybrid Taproot token...")
 
@@ -1450,7 +1450,7 @@ func handleCreateCommand() {
 	// Create token based on the selected mode
 	if useHybridMode && recipientPubKey != nil {
 		// Use hybrid mode with recipient's pubkey as internal key
-		output, err = CreateHybridToken(tokenName, tokenAmount, tokenMetadata, tokenTypeCode, 
+		output, err = CreateHybridToken(tokenName, tokenAmount, tokenMetadata, tokenTypeCode,
 			complianceFlags, jurisdictions, identityHash, expiryDays, recipientPubKey)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "❌ Error creating hybrid token: %v\n", err)
@@ -1496,7 +1496,7 @@ func handleCreateCommand() {
 		}
 	} else {
 		// Standard token without recipient (updated with compliance)
-		output, err = CreateToken(tokenName, tokenAmount, tokenMetadata, tokenTypeCode, 
+		output, err = CreateToken(tokenName, tokenAmount, tokenMetadata, tokenTypeCode,
 			complianceFlags, jurisdictions, identityHash, expiryDays)
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "❌ Error creating token: %v\n", err)
@@ -1956,7 +1956,7 @@ func scanDirectUTXOs(unspent []map[string]interface{}) ([]*TokenWithFunding, err
 			continue
 		}
 
-// Found a token! Show all fields including compliance
+		// Found a token! Show all fields including compliance
 		fmt.Printf("✅ Found token in UTXO %s:%d\n", txid, int(vout))
 		fmt.Printf("   Token ID: %s\n", tokenData.TokenID)
 		fmt.Printf("   Amount: %d\n", tokenData.Amount)
@@ -1964,7 +1964,7 @@ func scanDirectUTXOs(unspent []map[string]interface{}) ([]*TokenWithFunding, err
 		fmt.Printf("   Metadata: %s\n", tokenData.Metadata)
 		fmt.Printf("   Timestamp: %d (%s)\n", tokenData.Timestamp,
 			time.Unix(int64(tokenData.Timestamp), 0).Format(time.RFC3339))
-		
+
 		// Display compliance information if present
 		if tokenData.ComplianceFlags != 0 {
 			fmt.Printf("   Compliance: %s\n", GetComplianceFlagsDescription(tokenData.ComplianceFlags))
@@ -2724,27 +2724,113 @@ func main() {
 		return
 	case "guide":
 		fmt.Println(`
-🧭 CustomToken Full Workflow Guide
+🧭 TSB-P Token with Compliance - Full Workflow Guide
 
-Step 1. Create Hybrid Token with Auto-Funding:
-  ./tsb-token-cli create --name "CustomToken" --amount 50000000 --metadata "Final Split Test" --typecode 7 --hybrid --autofund
+COMPLIANCE TOKEN EXAMPLES:
 
-Step 2. Reveal the Token On-Chain:
-  ./tsb-token-cli reveal-hybrid
+1. Create a KYC-Required Stablecoin:
+  ./tsb-token-cli create --name "USDC" --amount 1000000 --typecode 1 --kyc-required --jurisdictions "US,EU,UK" --metadata "USD Stablecoin" --autofund
 
-Step 3. Scan Your Wallet Until Token Appears:
+2. Create a Security Token with Restrictions:
+  ./tsb-token-cli create --name "EQUITY" --amount 100 --typecode 2 --accredited-only --no-us --jurisdictions "EU,UK,SG" --metadata "Company Equity Token" --expiry-days 365 --autofund
+
+3. Create a Bond Token with Expiry:
+  ./tsb-token-cli create --name "BOND2025" --amount 1000 --typecode 3 --kyc-required --transfer-restricted --expiry-days 365 --metadata "Corporate Bond 2025" --autofund
+
+STANDARD WORKFLOW:
+
+Step 1. Create Token with Compliance:
+  ./tsb-token-cli create --name "MyToken" --amount 50000000 --typecode 1 --kyc-required --jurisdictions "US,EU" --autofund --autoreveal
+
+Step 2. Scan Your Wallet for Tokens:
   ./tsb-token-cli scan
 
-Verify with Bitcoin Core Wallet:
-  bitcoin-cli -testnet -rpcwallet=token_wallet listunspent
+Step 3. Transfer Token (respects compliance):
+  ./tsb-token-cli transfer --to [address] --amount 5000000
 
-Step 4. Transfer Token:
-  ./tsb-token-cli transfer --to tb1pct8yey5zpupmpj9r9l5kx050eepq87y49qdswlkak4342lnp83nqacuve3 --amount 5000000
+Step 4. Check Compliance Status:
+  ./tsb-token-cli check-compliance [txid]
 
-Step 5. Confirm Token Reached Recipient:
-  bitcoin-cli -testnet -rpcwallet=recipient listunspent
+COMPLIANCE FLAGS:
+  --kyc-required         Require KYC verification
+  --accredited-only      Only accredited investors
+  --no-us                Restrict US persons
+  --freezeable           Token can be frozen
+  --clawback             Enable clawback capability
+  --transfer-restricted  Restrict transfers
+  --jurisdictions        Comma-separated country codes (US,EU,UK,CA,JP,SG,CH,AU,HK,AE)
+  --expiry-days          Token expires after N days
+  --identity-hash        KYC identity hash
+
+TOKEN TYPES:
+  0 = Standard Token (no compliance)
+  1 = Stablecoin (auto KYC)
+  2 = Security Token (auto KYC + accredited)
+  3 = Bond Token (auto KYC + restricted + expiry)
+  4 = Equity Token (auto KYC + accredited + freezeable)
+  5 = Restricted Token (auto KYC + transfer restricted)
 `)
 		os.Exit(0)
+
+case "check-compliance":
+		if len(os.Args) < 2 {
+			fmt.Fprintln(os.Stderr, "❌ Missing transaction ID")
+			fmt.Fprintln(os.Stderr, "Usage: ./tsb-token-cli check-compliance <txid>")
+			os.Exit(1)
+		}
+		txid := os.Args[1]
+		
+		// Extract token data
+		tokenData, err := ExtractTokenFromTxID(txid)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "❌ Failed to extract token data: %v\n", err)
+			os.Exit(1)
+		}
+		
+		fmt.Println("\n📋 Token Compliance Status:")
+		fmt.Printf("  Token ID: %s\n", strings.TrimRight(tokenData.TokenID, "\x00"))
+		fmt.Printf("  Type: %s\n", GetTokenTypeName(tokenData.TypeCode))
+		fmt.Printf("  Amount: %d\n", tokenData.Amount)
+		
+		// Check compliance status
+		fmt.Println("\n🔒 Compliance Requirements:")
+		if tokenData.ComplianceFlags == 0 {
+			fmt.Println("  ✅ No compliance restrictions")
+		} else {
+			fmt.Printf("  %s\n", GetComplianceFlagsDescription(tokenData.ComplianceFlags))
+		}
+		
+		// Check jurisdictions
+		if tokenData.JurisdictionBits != 0 {
+			fmt.Printf("\n🌍 Allowed Jurisdictions: %s\n", JurisdictionBitsToString(tokenData.JurisdictionBits))
+		}
+		
+		// Check expiry
+		if tokenData.Expiry > 0 {
+			expiryTime := time.Unix(int64(tokenData.Expiry), 0)
+			fmt.Printf("\n⏰ Expiry: %s", expiryTime.Format("2006-01-02 15:04:05"))
+			if time.Now().After(expiryTime) {
+				fmt.Println(" ⚠️ EXPIRED")
+			} else {
+				remaining := time.Until(expiryTime)
+				fmt.Printf(" (%.0f days remaining)\n", remaining.Hours()/24)
+			}
+		}
+		
+		// Check if token is compliant
+		if IsTokenCompliant(tokenData) {
+			fmt.Println("\n✅ Token is currently COMPLIANT")
+		} else {
+			fmt.Println("\n❌ Token is NOT COMPLIANT")
+			if tokenData.Expiry > 0 && time.Now().After(time.Unix(int64(tokenData.Expiry), 0)) {
+				fmt.Println("  Reason: Token has expired")
+			}
+			if tokenData.ComplianceFlags&FLAG_KYC_REQUIRED != 0 && tokenData.IdentityHash == "" {
+				fmt.Println("  Reason: KYC required but no identity hash present")
+			}
+		}
+		
+		return
 	default:
 		fmt.Fprintf(os.Stderr, "❌ Unknown command: %s\n", command)
 		os.Exit(1)
