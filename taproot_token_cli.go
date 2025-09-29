@@ -1456,44 +1456,43 @@ func handleCreateCommand() {
 			fmt.Fprintf(os.Stderr, "❌ Error creating hybrid token: %v\n", err)
 			os.Exit(1)
 		}
-	} else if recipientPubKey != nil {
-		// Standard token with ownership (existing code)
-		token := &TokenData{
-			TokenID:   tokenName,
-			Amount:    tokenAmount,
-			Metadata:  tokenMetadata,
-			TypeCode:  tokenTypeCode,
-			Timestamp: uint64(time.Now().Unix()),
-		}
+	}  else if recipientPubKey != nil {
+    // Standard token with recipient and wallet-derived key
+    issuerToken, walletAddr, err := DeriveTokenKeyFromWallet(tokenName)
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "❌ Failed to derive wallet key: %v\n", err)
+        os.Exit(1)
+    }
 
-		issuerToken, err := NewTaprootToken()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "❌ Token key gen failed: %v\n", err)
-			os.Exit(1)
-		}
-		if err = issuerToken.SavePrivateKey("token_key.hex"); err != nil {
-			fmt.Fprintf(os.Stderr, "❌ Could not save token key: %v\n", err)
-			os.Exit(1)
-		}
+    token := &TokenData{
+        TokenID:   tokenName,
+        Amount:    tokenAmount,
+        Metadata:  tokenMetadata,
+        TypeCode:  tokenTypeCode,
+        Timestamp: uint64(time.Now().Unix()),
+    }
 
-		tree, err := issuerToken.CreateTaprootOutputWithOwnership(token, recipientPubKey)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "❌ Script creation failed: %v\n", err)
-			os.Exit(1)
-		}
+    tree, err := issuerToken.CreateTaprootOutputWithOwnership(token, recipientPubKey)
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "❌ Script creation failed: %v\n", err)
+        os.Exit(1)
+    }
 
-		addr, err := issuerToken.GetTaprootAddress()
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "❌ Address generation failed: %v\n", err)
-			os.Exit(1)
-		}
+    addr, err := issuerToken.GetTaprootAddress()
+    if err != nil {
+        fmt.Fprintf(os.Stderr, "❌ Address generation failed: %v\n", err)
+        os.Exit(1)
+    }
 
-		output = &OutputData{
-			Address:         addr,
-			ScriptHex:       hex.EncodeToString(tree.Script),
-			ControlBlockHex: hex.EncodeToString(tree.ControlBlock),
-			TokenData:       *token,
-		}
+    output = &OutputData{
+        Address:         addr,
+        ScriptHex:       hex.EncodeToString(tree.Script),
+        ControlBlockHex: hex.EncodeToString(tree.ControlBlock),
+        TokenData:       *token,
+        DerivationPath:  GetTokenDerivationPath(tokenName, Network == &chaincfg.TestNet3Params),
+        WalletAddress:   walletAddr,
+    }
+
 	} else {
 		// Standard token without recipient (updated with compliance)
 		output, err = CreateToken(tokenName, tokenAmount, tokenMetadata, tokenTypeCode,
